@@ -7,9 +7,9 @@ const nextConfig: NextConfig = {
     return [
       {
         source: '/media/:path*',
-        destination: `${process.env.BACKEND_URL || 'http://127.0.0.1:8001'}/media/:path*`,
+        destination: `${process.env.BACKEND_URL || 'http://127.0.0.1:8002'}/media/:path*`,
       },
-      { source: '/api/:path*', destination: `${process.env.BACKEND_URL || 'http://127.0.0.1:8001'}/api/:path*/` },
+      { source: '/api/:path*', destination: `${process.env.BACKEND_URL || 'http://127.0.0.1:8002'}/api/:path*/` },
     ];
   },
 };

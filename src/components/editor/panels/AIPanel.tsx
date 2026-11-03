@@ -2,11 +2,12 @@
 
 import { useState } from 'react';
 import { useParams } from 'next/navigation';
-import { Sparkles, Upload, Clock, Languages, Zap, Music, Captions, ChevronRight, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Sparkles, Upload, Clock, Languages, Zap, Music, Captions, ChevronRight, Loader2, CheckCircle2, AlertCircle, Send, MessageSquareText } from 'lucide-react';
 import { ReelStyle } from '@/types/api';
 import { apiMedia, apiAI, type AIJobAPI, type MediaFileAPI } from '@/lib/api';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { Project } from '@/types/timeline';
+import { usePlaybackStore } from '@/stores/playbackStore';
 
 const STYLES: { id: ReelStyle; label: string; desc: string; emoji: string }[] = [
   { id: 'viral',        label: 'Viral',        desc: 'Hook قوي + إيقاع سريع',    emoji: '🔥' },
@@ -20,6 +21,7 @@ export function AIPanel() {
   const params = useParams();
   const projectId = params?.projectId as string | undefined;
   const { initProject } = useTimelineStore();
+  const project = useTimelineStore(s => s.project);
 
   const [step, setStep] = useState<'upload' | 'configure' | 'processing' | 'done' | 'error'>('upload');
   const [uploadedFile, setUploadedFile] = useState<MediaFileAPI | null>(null);
@@ -38,6 +40,8 @@ export function AIPanel() {
   const [errorMsg, setErrorMsg] = useState('');
   const [isUploading, setIsUploading] = useState(false);
   const [activeJob, setActiveJob] = useState<AIJobAPI | null>(null);
+  const [directorRequest, setDirectorRequest] = useState('');
+  const [directorReply, setDirectorReply] = useState('');
 
   function toggleOption(key: keyof typeof options) {
     setOptions(prev => ({ ...prev, [key]: !prev[key] }));
@@ -118,8 +122,52 @@ export function AIPanel() {
     }
   }
 
+  function applyDirectorRequest(request = directorRequest) {
+    const text = request.trim().toLocaleLowerCase();
+    if (!text || !project) return;
+    const { updateClip, removeClip } = useTimelineStore.getState();
+    const clips = project.tracks.flatMap(track => track.clips);
+    const captions = clips.filter(clip => clip.type === 'caption');
+    const hooks = clips.filter(clip => clip.type === 'text').sort((a, b) => a.startTime - b.startTime);
+    if (/(كبر|كبّر|اكبر|أكبر|large)/.test(text) && /(كابشن|كلمات|caption)/.test(text) && captions.length) {
+      captions.forEach(clip => updateClip(clip.id, { style: { ...clip.style, fontSize: Math.min(112, clip.style.fontSize + 8) } }));
+      setDirectorReply('كبرت الكابشن ٨ نقاط. تقدر تتراجع بـ Ctrl+Z.');
+    } else if (/(صغر|صغّر|اصغر|أصغر|small)/.test(text) && /(كابشن|كلمات|caption)/.test(text) && captions.length) {
+      captions.forEach(clip => updateClip(clip.id, { style: { ...clip.style, fontSize: Math.max(24, clip.style.fontSize - 8) } }));
+      setDirectorReply('صغرت الكابشن ٨ نقاط. تقدر تتراجع بـ Ctrl+Z.');
+    } else if (/(قصر|قصّر|اختصر|اقصر|short)/.test(text) && /(هوك|hook)/.test(text) && hooks.length) {
+      updateClip(hooks[0].id, { duration: Math.min(hooks[0].duration, 2.5) });
+      setDirectorReply('قصرت مدة الهوك إلى ٢٫٥ ثانية كحد أقصى. تقدر تتراجع بـ Ctrl+Z.');
+    } else if (/(اخف|أخف|اخفي|أخفي|احذف|شيل|hide|remove)/.test(text) && /(كابشن|captions)/.test(text) && captions.length) {
+      captions.forEach(clip => removeClip(clip.id));
+      setDirectorReply('أخفيت مسار الكابشن. تقدر تتراجع بـ Ctrl+Z.');
+    } else {
+      setDirectorReply('جرّب: «كبر الكابشن»، «صغر الكابشن»، «قصر الهوك»، أو «اخفِ الكابشن». التعديلات تُطبق على الـTimeline مباشرة.');
+    }
+  }
+
   return (
     <div style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {project?.storyPlan && (
+        <section style={{ border: '1px solid var(--bg-border)', borderRadius: 12, padding: 12, background: 'var(--bg-elevated)' }} dir="rtl">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontWeight: 700, fontSize: 13, marginBottom: 7 }}>
+            <MessageSquareText size={15} color="#74bd96" /> المخرج · خطة المشاهد
+          </div>
+          {project.storyPlan.summary && <p style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.7, margin: '0 0 8px' }}>{project.storyPlan.summary}</p>}
+          <div style={{ display: 'grid', gap: 5 }}>
+            {project.storyPlan.beats.map((beat, index) => (
+              <button key={index} onClick={() => usePlaybackStore.getState().setCurrentTime(beat.startTime)} style={{ textAlign: 'right', padding: '7px 8px', border: '1px solid var(--bg-border)', borderRadius: 8, background: 'transparent', color: 'var(--text-secondary)', fontSize: 10, cursor: 'pointer' }}>
+                {Math.floor(beat.startTime / 60)}:{String(Math.floor(beat.startTime % 60)).padStart(2, '0')} · {beat.description}
+              </button>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+            <input value={directorRequest} onChange={e => setDirectorRequest(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') applyDirectorRequest(); }} placeholder="اطلب تعديلًا سريعًا على الريل…" style={{ flex: 1, minWidth: 0, padding: '9px 10px', borderRadius: 8, border: '1px solid var(--bg-border)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 11 }} />
+            <button onClick={() => applyDirectorRequest()} aria-label="تنفيذ تعديل المخرج" style={{ width: 38, border: 0, borderRadius: 8, background: '#27634b', color: 'white', cursor: 'pointer' }}><Send size={15} /></button>
+          </div>
+          {directorReply && <p role="status" style={{ fontSize: 10, lineHeight: 1.7, color: 'var(--text-muted)', margin: '7px 0 0' }}>{directorReply}</p>}
+        </section>
+      )}
       {/* Header */}
       <div style={{
         background: 'linear-gradient(135deg, rgba(139,92,246,0.15), rgba(6,182,212,0.08))',

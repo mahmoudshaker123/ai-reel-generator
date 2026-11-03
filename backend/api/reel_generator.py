@@ -400,6 +400,22 @@ def generate_reel_timeline(media_file: MediaFile, prompt_text: str, project_titl
         },
     ]
 
+    story_beats = []
+    for beat in (gemini_data or {}).get('visual_beats', []):
+        source_start = max(0.0, float(beat.get('startTime', 0)))
+        source_end = max(source_start, float(beat.get('endTime', source_start)))
+        for video in video_clips:
+            overlap_start = max(source_start, float(video['trimStart']))
+            overlap_end = min(source_end, float(video['trimEnd']))
+            if overlap_end <= overlap_start:
+                continue
+            offset = float(video['startTime']) - float(video['trimStart'])
+            story_beats.append({
+                'startTime': round(overlap_start + offset, 2),
+                'endTime': round(overlap_end + offset, 2),
+                'description': str(beat.get('description', 'لحظة من الفيديو'))[:180],
+            })
+
     title = project_title or (f"ريل {gemini_data['hook_title'][:25]}" if gemini_data and gemini_data.get('hook_title') else f"ريل ذكي — {prompt_text[:28]}..." if prompt_text else "ريل احترافي جديد")
 
     timeline_json = {
@@ -411,6 +427,10 @@ def generate_reel_timeline(media_file: MediaFile, prompt_text: str, project_titl
         'width': 1080,
         'height': 1920,
         'tracks': tracks,
+        'storyPlan': {
+            'summary': str((gemini_data or {}).get('summary', ''))[:500],
+            'beats': story_beats,
+        },
         'globalAudio': {'masterVolume': 1.0},
         'settings': {
             'backgroundColor': '#000000',
