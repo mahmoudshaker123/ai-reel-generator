@@ -1,0 +1,2 @@
+const {chromium}=require('playwright');
+(async()=>{const b=await chromium.launch({channel:'msedge',headless:true});const p=await b.newPage();await p.goto('http://localhost:3000');console.log(await p.evaluate(()=>[...document.querySelectorAll('html,body,.dashboard-layout,.studio-main,.projects-section')].map(e=>({name:e.className||e.tagName,rect:e.getBoundingClientRect().toJSON(),height:getComputedStyle(e).height,overflow:getComputedStyle(e).overflow,position:getComputedStyle(e).position}))));await b.close()})()

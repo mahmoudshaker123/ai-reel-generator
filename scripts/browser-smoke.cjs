@@ -1,0 +1,2 @@
+﻿const {chromium}=require('playwright');
+(async()=>{const browser=await chromium.launch({channel:'msedge',headless:true});const page=await browser.newPage({viewport:{width:1440,height:1000}});page.on('pageerror',e=>console.log('PAGE ERROR',e.message));await page.goto('http://localhost:3000');await page.waitForTimeout(2000);console.log(await page.title());console.log((await page.locator('body').innerText()).slice(0,200));await page.screenshot({path:'.artifacts/dashboard-desktop.png',fullPage:true});await browser.close()})().catch(e=>{console.error(e);process.exit(1)});

@@ -1,0 +1,50 @@
+﻿import { test, expect } from '@playwright/test';
+import fs from 'node:fs';
+const fixture = JSON.parse(fs.readFileSync('.artifacts/fixture.json', 'utf8'));
+
+test('desktop dashboard, Gemini dialog and responsive layout', async ({ page }) => {
+  const errors: string[]=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.goto('/');
+  await expect(page.getByRole('heading',{name:'فكرتك تستحق لقطة أحلى.'})).toBeVisible();
+  await expect(page.locator('.studio-error')).toHaveCount(0);
+  await page.screenshot({path:'.artifacts/dashboard-desktop.png',fullPage:true});
+  await page.getByRole('button',{name:'Gemini',exact:false}).first().click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await expect(page.locator('input[type="password"]')).toBeVisible();
+  await page.getByRole('button',{name:'إغلاق',exact:true}).first().click();
+  await page.setViewportSize({width:390,height:844});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBeTruthy();
+  await page.screenshot({path:'.artifacts/dashboard-mobile.png',fullPage:true});
+  expect(errors).toEqual([]);
+});
+
+test('only the active clip plays, crossing a cut keeps the media clock in sync',async({page})=>{
+  const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.goto(`/editor/${fixture.id}`);
+  await expect(page.getByRole('button',{name:'تشغيل',exact:true})).toBeVisible();
+  await page.waitForFunction(()=>document.querySelectorAll('video').length===2 && [...document.querySelectorAll('video')].every(v=>v.readyState>=2));
+  await page.getByRole('button',{name:'تشغيل',exact:true}).click();
+  await page.waitForTimeout(1200);
+  let state=await page.evaluate(()=>[...document.querySelectorAll('video')].map(v=>({time:v.currentTime,paused:v.paused,seeking:v.seeking})));
+  expect(state.filter(v=>!v.paused)).toHaveLength(1);
+  expect(state[0].time).toBeGreaterThan(.5);
+  expect(state[1].paused).toBeTruthy();
+  await page.waitForTimeout(3000);
+  state=await page.evaluate(()=>[...document.querySelectorAll('video')].map(v=>({time:v.currentTime,paused:v.paused,seeking:v.seeking})));
+  expect(state.filter(v=>!v.paused)).toHaveLength(1);
+  expect(state[0].paused).toBeTruthy();
+  expect(state[1].time).toBeGreaterThan(4);
+  await page.getByRole('button',{name:'إيقاف مؤقت',exact:true}).click();
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(()=>[...document.querySelectorAll('video')].every(v=>v.paused))).toBeTruthy();
+  await page.screenshot({path:'.artifacts/editor-desktop.png',fullPage:true});
+  await page.getByRole('button',{name:'Gemini API',exact:false}).first().click();
+  const dialog=page.getByRole('dialog');await expect(dialog).toBeVisible();
+  const bounds=await dialog.boundingBox();expect(bounds?.y).toBeGreaterThanOrEqual(0);
+  await page.getByRole('button',{name:'إغلاق',exact:true}).first().click();
+  await page.setViewportSize({width:390,height:844});await page.reload();
+  await expect(page.getByRole('button',{name:'تشغيل',exact:true})).toBeVisible();
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBeTruthy();
+  await page.screenshot({path:'.artifacts/editor-mobile.png',fullPage:true});
+  expect(errors).toEqual([]);
+});
