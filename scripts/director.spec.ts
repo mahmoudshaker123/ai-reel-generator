@@ -7,9 +7,9 @@ test('director story plan and reversible edits work on a generated reel', async 
   await page.getByRole('button', { name: 'AI', exact: true }).click();
   await expect(page.getByText('المخرج · خطة المشاهد')).toBeVisible();
   await expect(page.locator('.editor-left-panel').getByRole('button').filter({ hasText: /السيانوزس|الأكسجين|المتحدث/ }).first()).toBeVisible();
-  await page.getByPlaceholder('اطلب تعديلًا سريعًا على الريل…').fill('كبر الكابشن');
+  await page.getByPlaceholder('اطلب تعديلًا سريعًا على الريل…').fill('خلي خلفية الكابشن شفافة');
   await page.getByRole('button', { name: 'تنفيذ تعديل المخرج' }).click();
-  await expect(page.getByRole('status')).toContainText('كبرت الكابشن');
+  await expect(page.getByRole('status')).toContainText('تم تطبيق التعديلات المطلوبة');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
   expect(errors).toEqual([]);
 });

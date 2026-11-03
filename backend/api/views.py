@@ -2,6 +2,8 @@
 API Views — REST endpoints for Reel Studio
 """
 import os
+import json
+import re
 import mimetypes
 from datetime import timezone
 
@@ -19,7 +21,9 @@ from .serializers import (
     MediaUploadSerializer, AIJobCreateSerializer,
 )
 from .ai_service import start_ai_job
-from .gemini_service import get_gemini_api_key, save_gemini_api_key, test_gemini_key
+from google import genai
+from google.genai import types as genai_types
+from .gemini_service import ACTIVE_MODELS, get_gemini_api_key, save_gemini_api_key, test_gemini_key, public_error
 
 
 # ─── Gemini Settings ──────────────────────────────────────────
@@ -118,6 +122,130 @@ def save_timeline(request, project_id):
     project.fps      = timeline.get('fps', project.fps)
     project.save()
     return Response({'message': 'Timeline saved', 'updated_at': project.updated_at.isoformat()})
+
+
+@api_view(['POST'])
+def director_edit(request, project_id):
+    """Interpret a short natural-language director request and apply allowlisted timeline edits."""
+    prompt = str(request.data.get('prompt', '')).strip()
+    if not prompt or len(prompt) > 800:
+        return Response({'error': 'اكتب طلب تعديل قصيرًا (حتى ٨٠٠ حرف).'}, status=400)
+    project = get_object_or_404(Project, id=project_id)
+    timeline = project.timeline_json or {}
+    api_key = get_gemini_api_key()
+    if not api_key:
+        return Response({'error': 'أضف مفتاح Gemini أولاً.'}, status=400)
+
+    text_clips = [clip for track in timeline.get('tracks', []) for clip in track.get('clips', []) if clip.get('type') == 'text']
+    caption_tracks = [track for track in timeline.get('tracks', []) if track.get('type') == 'caption']
+    context = {
+        'title': timeline.get('title', project.title),
+        'summary': (timeline.get('storyPlan') or {}).get('summary', ''),
+        'story_beats': (timeline.get('storyPlan') or {}).get('beats', []),
+        'hooks': [{'content': clip.get('content', ''), 'duration': clip.get('duration', 0)} for clip in text_clips[:4]],
+        'caption_samples': [segment.get('text', '') for track in caption_tracks for clip in track.get('clips', []) for segment in clip.get('segments', [])[:6]],
+        'caption_font_size': next((clip.get('style', {}).get('fontSize') for track in caption_tracks for clip in track.get('clips', [])), 64),
+    }
+    normalized = prompt.lower()
+    quick_edits = []
+    if caption_tracks and re.search(r'(كبر|كبّر|اكبر|أكبر|ارفع|زوّد|زود|larger)', normalized) and re.search(r'(كابشن|كلمات|caption)', normalized):
+        current_size = float(context['caption_font_size'] or 64)
+        quick_edits.append({'type': 'caption_font_size', 'value': min(112, current_size + 8)})
+    elif caption_tracks and re.search(r'(صغر|صغّر|اصغر|أصغر|قلل|قلّل|smaller)', normalized) and re.search(r'(كابشن|كلمات|caption)', normalized):
+        current_size = float(context['caption_font_size'] or 64)
+        quick_edits.append({'type': 'caption_font_size', 'value': max(24, current_size - 8)})
+    if caption_tracks and re.search(r'(شفاف|بدون خلفيه|بلا خلفيه|ازاله الخلفيه|ازل الخلفيه|remove background|transparent)', normalized):
+        quick_edits.append({'type': 'caption_background', 'value': False})
+    elif caption_tracks and re.search(r'(اظهر الخلفيه|اظهر خلفيه|show background)', normalized):
+        quick_edits.append({'type': 'caption_background', 'value': True})
+    if caption_tracks and re.search(r'(اخف|أخف|اخفي|أخفي|احذف|شيل).*(كابشن|captions)', normalized):
+        quick_edits.append({'type': 'captions_hidden', 'value': True})
+    if text_clips and re.search(r'(اقصر|أقصر|قصر|قصّر|اختصر|shorter|shorten)', normalized) and re.search(r'(هوك|hook|عنوان)', normalized):
+        current_duration = float(min(text_clips, key=lambda item: float(item.get('startTime', 0))).get('duration', 3))
+        quick_edits.append({'type': 'hook_duration', 'value': min(2.5, current_duration)})
+    hook_match = re.search(r'(?:اجعل|غير|غيّر|بدل|بدّل)\s+(?:عنوان\s+)?(?:الهوك|هوك|hook)\s+(?:الى|إلى|:|：)\s*["«“]?(.*?)["»”]?$' , prompt.strip(), re.IGNORECASE)
+    if text_clips and hook_match and hook_match.group(1).strip():
+        quick_edits.append({'type': 'hook_text', 'value': hook_match.group(1).strip()[:100]})
+
+    system = (
+        "You are an editing director. Return JSON only: {message: Arabic string, edits: array}. "
+        "Allowed edits only: {type:'caption_font_size',value:24..112}; {type:'hook_duration',value:0.8..5}; "
+        "{type:'hook_text',value:string up to 100 chars}; {type:'captions_hidden',value:boolean}; "
+        "{type:'caption_background',value:boolean}. Do not invent clips, transcripts, or unsupported editing operations. "
+        "If the user asks for something outside these edits, return edits:[] and explain what is supported in Arabic."
+    )
+    client = None
+    try:
+        if quick_edits:
+            data = {'message': 'تم تطبيق التعديلات المطلوبة مباشرة على الـTimeline.', 'edits': quick_edits}
+        else:
+            client = genai.Client(api_key=api_key, http_options=genai_types.HttpOptions(timeout=90000))
+            result = None
+            last_error = None
+            for model_name in ACTIVE_MODELS:
+                try:
+                    result = client.models.generate_content(
+                        model=model_name,
+                        contents=[system, f"Project context: {json.dumps(context, ensure_ascii=False)}\nUser request: {prompt}"],
+                        config=genai_types.GenerateContentConfig(temperature=0.1),
+                    )
+                    if result and result.text:
+                        break
+                except Exception as model_error:
+                    last_error = model_error
+                    if getattr(model_error, 'code', None) not in (404, 500, 503, 504):
+                        raise
+            if not result or not result.text:
+                raise last_error or RuntimeError('Gemini did not return an edit plan.')
+            raw = result.text.strip()
+            raw = raw.removeprefix('```json').removeprefix('```').removesuffix('```').strip()
+            data = json.loads(raw)
+        edits = data.get('edits', [])
+        applied = []
+        for edit in edits[:5]:
+            kind = edit.get('type')
+            value = edit.get('value')
+            if kind == 'caption_font_size' and caption_tracks:
+                size = max(24, min(112, int(value)))
+                for track in caption_tracks:
+                    for clip in track.get('clips', []):
+                        clip.setdefault('style', {})['fontSize'] = size
+                applied.append({'type': kind, 'value': size})
+            elif kind == 'hook_duration' and text_clips:
+                clip = min(text_clips, key=lambda item: float(item.get('startTime', 0)))
+                duration = max(0.8, min(5, float(value), float(timeline.get('duration', value))))
+                clip['duration'] = duration
+                applied.append({'type': kind, 'value': duration})
+            elif kind == 'hook_text' and text_clips and isinstance(value, str) and value.strip():
+                clip = min(text_clips, key=lambda item: float(item.get('startTime', 0)))
+                clip['content'] = value.strip()[:100]
+                applied.append({'type': kind, 'value': clip['content']})
+            elif kind == 'captions_hidden' and caption_tracks and isinstance(value, bool):
+                for track in caption_tracks:
+                    track['hidden'] = value
+                applied.append({'type': kind, 'value': value})
+            elif kind == 'caption_background' and caption_tracks and isinstance(value, bool):
+                for track in caption_tracks:
+                    for clip in track.get('clips', []):
+                        clip.setdefault('style', {})['showBackground'] = value
+                        clip['style']['backgroundOpacity'] = 0.72 if value else 0
+                applied.append({'type': kind, 'value': value})
+        if not applied:
+            return Response({'message': data.get('message', 'لم أجد تعديلًا آمنًا مطابقًا للطلب.'), 'timeline': timeline, 'changed': False})
+        timeline['updatedAt'] = dj_timezone.now().isoformat()
+        project.timeline_json = timeline
+        project.title = timeline.get('title', project.title)
+        project.duration = timeline.get('duration', project.duration)
+        project.save()
+        return Response({'message': data.get('message', 'تم تطبيق التعديل على الـTimeline.'), 'timeline': timeline, 'changed': True})
+    except Exception as error:
+        detail = public_error(error, api_key)
+        if getattr(error, 'winerror', None) == 10013 or 'WinError 10013' in str(error):
+            detail = 'Windows يمنع اتصال Python بـGemini (WinError 10013). اسمح لـPython بالاتصال عبر جدار الحماية.'
+        return Response({'error': detail}, status=502)
+    finally:
+        if client:
+            client.close()
 
 
 # ══════════════════════════════════════════════════════════════

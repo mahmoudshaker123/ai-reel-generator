@@ -315,6 +315,11 @@ export const apiAI = {
   },
 };
 
+export const apiDirector = {
+  edit: (projectId: string, prompt: string): Promise<{ changed: boolean; message: string; timeline: Record<string, unknown> }> =>
+    request('/projects/' + encodeURIComponent(projectId) + '/director/', { method: 'POST', body: JSON.stringify({ prompt }) }),
+};
+
 // ─── Gemini Settings ──────────────────────────────────────────
 export const apiGemini = {
   getStatus: (): Promise<{ configured: boolean; masked_key: string; model: string }> =>

@@ -74,6 +74,64 @@ class StudioTests(TransactionTestCase):
         self.assertAlmostEqual(info['duration'],4,delta=.15)
         subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(),'-v','error','-i',str(result),'-f','null','-'],check=True,capture_output=True)
 
+    @patch('api.views.get_gemini_api_key', return_value='local-test-key')
+    @patch('api.views.genai.Client')
+    def test_director_applies_allowlisted_hook_edit(self, client_factory, _key):
+        import json
+        from unittest.mock import MagicMock
+        timeline = {
+            'id': str(self.project.id), 'title': 'Director fixture', 'duration': 4,
+            'tracks': [
+                {'id': 'text', 'type': 'text', 'clips': [
+                    {'id': 'hook', 'type': 'text', 'startTime': 0, 'duration': 3, 'content': 'Old hook'}]},
+                {'id': 'captions', 'type': 'caption', 'clips': []},
+            ],
+        }
+        self.project.timeline_json = timeline
+        self.project.save(update_fields=['timeline_json'])
+        client = MagicMock()
+        client.models.generate_content.return_value.text = json.dumps({
+            'message': 'تم تحسين الهوك',
+            'edits': [{'type': 'hook_text', 'value': 'افتتاحية أوضح'}],
+        }, ensure_ascii=False)
+        client_factory.return_value = client
+
+        response = self.client.post(
+            f'/api/projects/{self.project.id}/director/',
+            {'prompt': 'اجعل عنوان البداية أوضح'}, format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['changed'])
+        self.assertEqual(response.data['timeline']['tracks'][0]['clips'][0]['content'], 'افتتاحية أوضح')
+        self.project.refresh_from_db()
+        self.assertEqual(self.project.timeline_json['tracks'][0]['clips'][0]['content'], 'افتتاحية أوضح')
+        client.close.assert_called_once()
+
+    @patch('api.views.get_gemini_api_key', return_value='local-test-key')
+    @patch('api.views.genai.Client', side_effect=AssertionError('quick edits must stay local'))
+    def test_director_quick_caption_edit_needs_no_network(self, _client, _key):
+        self.project.timeline_json = {
+            'id': str(self.project.id), 'title': 'Quick edit fixture', 'duration': 4,
+            'tracks': [{
+                'id': 'captions', 'type': 'caption', 'hidden': False, 'clips': [{
+                    'id': 'caption', 'type': 'caption', 'startTime': 0, 'duration': 4,
+                    'style': {'fontSize': 64, 'showBackground': True, 'backgroundOpacity': 0.7},
+                    'segments': [],
+                }],
+            }],
+        }
+        self.project.save(update_fields=['timeline_json'])
+        response = self.client.post(
+            f'/api/projects/{self.project.id}/director/',
+            {'prompt': 'كبّر الكابشن قليلًا وخلي خلفيته شفافة'}, format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        caption = response.data['timeline']['tracks'][0]['clips'][0]
+        self.assertEqual(caption['style']['fontSize'], 72)
+        self.assertEqual(caption['style']['backgroundOpacity'], 0)
+        self.assertTrue(response.data['changed'])
+
     def test_export_failure_does_not_return_fake_download(self):
         job=RenderJob.objects.create(project=self.project,timeline_snapshot={'duration':1,'tracks':[]},resolution='720x1280',fps=30,format='mp4')
         render(str(job.id));job.refresh_from_db()

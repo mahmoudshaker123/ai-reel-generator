@@ -4,10 +4,11 @@ import { useState } from 'react';
 import { useParams } from 'next/navigation';
 import { Sparkles, Upload, Clock, Languages, Zap, Music, Captions, ChevronRight, Loader2, CheckCircle2, AlertCircle, Send, MessageSquareText } from 'lucide-react';
 import { ReelStyle } from '@/types/api';
-import { apiMedia, apiAI, type AIJobAPI, type MediaFileAPI } from '@/lib/api';
+import { apiMedia, apiAI, apiDirector, type AIJobAPI, type MediaFileAPI } from '@/lib/api';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { Project } from '@/types/timeline';
 import { usePlaybackStore } from '@/stores/playbackStore';
+import { useHistoryStore } from '@/stores/historyStore';
 
 const STYLES: { id: ReelStyle; label: string; desc: string; emoji: string }[] = [
   { id: 'viral',        label: 'Viral',        desc: 'Hook قوي + إيقاع سريع',    emoji: '🔥' },
@@ -122,7 +123,7 @@ export function AIPanel() {
     }
   }
 
-  function applyDirectorRequest(request = directorRequest) {
+  async function applyDirectorRequest(request = directorRequest) {
     const text = request.trim().toLocaleLowerCase();
     if (!text || !project) return;
     const { updateClip, removeClip } = useTimelineStore.getState();
@@ -142,7 +143,24 @@ export function AIPanel() {
       captions.forEach(clip => removeClip(clip.id));
       setDirectorReply('أخفيت مسار الكابشن. تقدر تتراجع بـ Ctrl+Z.');
     } else {
-      setDirectorReply('جرّب: «كبر الكابشن»، «صغر الكابشن»، «قصر الهوك»، أو «اخفِ الكابشن». التعديلات تُطبق على الـTimeline مباشرة.');
+      if (!projectId || projectId.startsWith('local_')) {
+        setDirectorReply('افتح مشروعًا محفوظًا للاتصال بالمخرج الذكي.');
+        return;
+      }
+      setDirectorReply('المخرج يراجع طلبك…');
+      try {
+        const result = await apiDirector.edit(projectId, request);
+        if (!result.changed) {
+          setDirectorReply(result.message || 'لم يُطبّق أي تعديل.');
+          return;
+        }
+        useHistoryStore.getState().pushState(project);
+        initProject(result.timeline as unknown as Project);
+        useTimelineStore.getState().setDirty(true);
+        setDirectorReply(result.message || 'تم تطبيق التعديل وحفظه في الـTimeline.');
+      } catch (error) {
+        setDirectorReply(`تعذر تنفيذ التعديل: ${error instanceof Error ? error.message : 'تحقق من اتصال Gemini'}`);
+      }
     }
   }
 

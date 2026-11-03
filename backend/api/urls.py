@@ -7,6 +7,7 @@ from . import views
 urlpatterns = [
     # ── Unified One-Shot AI Reel Generator ─────────────────────
     path('generate-reel/', views.generate_reel_view, name='generate-reel'),
+    path('projects/<uuid:project_id>/director/', views.director_edit, name='director-edit'),
 
     # ── Health ─────────────────────────────────────────────────
     path('health/', views.health_check, name='health'),
