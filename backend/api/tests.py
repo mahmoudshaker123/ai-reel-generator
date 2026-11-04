@@ -105,6 +105,7 @@ class StudioTests(TransactionTestCase):
         card = next(c for t in timeline['tracks'] for c in t['clips'] if c['type'] == 'text' and '35%' in c.get('content', ''))
         self.assertEqual(card['transform']['width'], 44)
         self.assertEqual(card['style']['backgroundColor'], '#222222')
+        self.assertIn('■■■■□□□□□□', card['content'])
         self.assertTrue(any('مشاهد توضيحية' in action for action in actions))
 
     def test_export_creates_decodable_video_with_audio_and_arabic(self):

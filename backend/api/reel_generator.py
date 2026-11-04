@@ -423,7 +423,13 @@ def generate_reel_timeline(media_file: MediaFile, prompt_text: str, project_titl
                 offset = float(video['startTime']) - float(video['trimStart'])
                 card_start = round(overlap_start + offset, 2)
                 card_duration = round(min(5.5, overlap_end - overlap_start), 2)
-                content_parts = [part for part in (stat_value, headline, stat_label) if part]
+                stat_chart = ''
+                percent_match = re.search(r'(\d{1,3})\s*%', stat_value)
+                if percent_match:
+                    percent = max(0, min(100, int(percent_match.group(1))))
+                    filled = min(10, (percent + 5) // 10)
+                    stat_chart = '■' * filled + '□' * (10 - filled)
+                content_parts = [part for part in (stat_value, stat_chart, headline, stat_label) if part]
                 text_clips.append({
                     'id': f"clip_visual_{uuid.uuid4().hex[:6]}",
                     'trackId': text_track_id,
