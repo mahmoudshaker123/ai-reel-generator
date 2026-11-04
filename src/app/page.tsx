@@ -2,7 +2,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Film, Plus, ArrowUpLeft, Upload, Sparkles, Scissors, Captions, FolderOpen, Trash2, Loader2, Check, Settings2 } from 'lucide-react';
+import { Film, Plus, ArrowUpLeft, Upload, Sparkles, Scissors, Captions, FolderOpen, Trash2, Loader2, Check, Settings2, Image as ImageIcon, PanelsTopLeft } from 'lucide-react';
 import { apiProjects, apiGenerateReel, apiGemini, type ProjectMeta } from '@/lib/api';
 import { GeminiKeyModal } from '@/components/modals/GeminiKeyModal';
 import { formatTime } from '@/lib/utils';
@@ -10,9 +10,13 @@ import { formatTime } from '@/lib/utils';
 export default function DashboardPage() {
   const router = useRouter();
   const input = useRef<HTMLInputElement>(null);
+  const referenceInput = useRef<HTMLInputElement>(null);
   const [projects, setProjects] = useState<ProjectMeta[]>([]);
   const [file, setFile] = useState<File | null>(null);
   const [prompt, setPrompt] = useState('احذف فترات السكوت وأضف كابشن عربي وعنوان مناسب للفيديو');
+  const [captionMode, setCaptionMode] = useState<'sentence' | 'word_by_word'>('sentence');
+  const [referenceImage, setReferenceImage] = useState<File | null>(null);
+  const [visualDirector, setVisualDirector] = useState(true);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -39,7 +43,17 @@ export default function DashboardPage() {
   async function generate() {
     if (!file || busy) return;
     setBusy(true); setError('');
-    try { const p = await apiGenerateReel({ video: file, prompt, title: file.name.replace(/\.[^.]+$/, '') }); router.push(`/editor/${p.project_id}`); }
+    try {
+      const p = await apiGenerateReel({
+        video: file,
+        prompt,
+        title: file.name.replace(/\.[^.]+$/, ''),
+        caption_mode: captionMode,
+        reference_image: referenceImage || undefined,
+        visual_director: visualDirector,
+      });
+      router.push(`/editor/${p.project_id}`);
+    }
     catch (e) { setError(e instanceof Error ? e.message : 'تعذر تحليل الفيديو'); setBusy(false); }
   }
   async function remove(p: ProjectMeta) {
@@ -62,6 +76,24 @@ export default function DashboardPage() {
         </div>
         <div className="prompt-panel"><span className="eyebrow">02 / اللمسة الإبداعية</span><h2>إيه اللي في بالك؟</h2><p>وصف بسيط للتعديلات، وبعدها راجع كل تفصيلة في المحرر.</p><label htmlFor="reel-prompt" className="sr-only">وصف التعديلات</label><textarea id="reel-prompt" className="input" value={prompt} onChange={e => setPrompt(e.target.value)} rows={4} />
           <div className="prompt-chips">{[{Icon:Scissors,text:'احذف فترات السكوت'}, {Icon:Captions,text:'أضف كابشن عربي'}, {Icon:Sparkles,text:'أضف عنوان جذاب'}].map(({Icon,text}) => <button key={text} onClick={() => setPrompt(p => p.includes(text) ? p : `${p}، ${text}`)}><Icon size={14} />{text}</button>)}</div>
+          <div className="generation-options" dir="rtl">
+            <div className="generation-option">
+              <div><Captions size={17} /><span><b>طريقة ظهور الكابشن</b><small>تقدر تغيّرها لاحقًا من المحرر</small></span></div>
+              <div className="segmented-control" role="group" aria-label="طريقة ظهور الكابشن">
+                <button className={captionMode === 'sentence' ? 'active' : ''} onClick={() => setCaptionMode('sentence')}>سطر كامل</button>
+                <button className={captionMode === 'word_by_word' ? 'active' : ''} onClick={() => setCaptionMode('word_by_word')}>كلمة بكلمة</button>
+              </div>
+            </div>
+            <label className="generation-option toggle-option">
+              <div><PanelsTopLeft size={17} /><span><b>المخرج البصري</b><small>بطاقات جانبية، أرقام، وتقسيم شاشة حسب الشرح</small></span></div>
+              <input type="checkbox" checked={visualDirector} onChange={e => setVisualDirector(e.target.checked)} />
+            </label>
+            <div className="generation-option reference-option">
+              <input ref={referenceInput} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={e => setReferenceImage(e.target.files?.[0] || null)} />
+              <div><ImageIcon size={17} /><span><b>صورة مرجعية للتصميم</b><small>{referenceImage ? referenceImage.name : 'اختياري · PNG أو JPG أو WebP'}</small></span></div>
+              <button className="btn btn-surface" type="button" onClick={() => referenceInput.current?.click()}>{referenceImage ? 'تغيير' : 'اختيار صورة'}</button>
+            </div>
+          </div>
           <button className="btn btn-primary generate-button" disabled={!file || !prompt.trim() || busy} onClick={generate}>{busy ? <Loader2 className="animate-spin" size={18} /> : <Sparkles size={18} />}{busy ? 'جاري تجهيز مشروعك…' : 'تجهيز الريل'}<ArrowUpLeft size={18} /></button>
           <button className="connection-note" onClick={() => setModal(true)}>{configured ? <Check size={14} /> : <Settings2 size={14} />}{configured ? 'مفتاح Gemini محفوظ · راجع الكابشن قبل النشر' : 'اربط Gemini لتفعيل التحليل والكابشن'}</button>
         </div>

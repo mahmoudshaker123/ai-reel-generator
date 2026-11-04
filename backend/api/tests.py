@@ -59,6 +59,54 @@ class StudioTests(TransactionTestCase):
         self.assertAlmostEqual(caption['segments'][0]['startTime'],1.2)
         self.assertAlmostEqual(caption['segments'][0]['words'][0]['startTime'],1.2)
 
+    def test_caption_modes_and_visual_director_use_reference_style(self):
+        words = [
+            {'word': word, 'startTime': index * .4, 'endTime': (index + 1) * .4}
+            for index, word in enumerate(('واحد', 'اثنان', 'ثلاثة', 'أربعة', 'خمسة', 'ستة'))
+        ]
+        analysis = {
+            'success': True,
+            'model': 'mock',
+            'silence_intervals': [],
+            'segments': [{'text': ' '.join(w['word'] for w in words), 'startTime': 0, 'endTime': 2.4, 'words': words}],
+            'visual_beats': [{
+                'startTime': .5,
+                'endTime': 2.2,
+                'description': 'شرح نسبة التحسن',
+                'layout': 'stat_card',
+                'headline': 'تحسن النتيجة',
+                'stat_value': '35%',
+                'stat_label': 'بعد تطبيق الخطوات',
+            }],
+            'design_style': {
+                'primaryColor': '#123456',
+                'accentColor': '#ABCDEF',
+                'captionColor': '#FEDCBA',
+                'cardColor': '#222222',
+            },
+            'hook_title': 'اختبار',
+            'cta_text': 'تابع',
+            'summary': 'ملخص',
+        }
+        with patch('api.reel_generator.analyze_video_with_gemini', return_value=analysis) as analyzer:
+            timeline, actions, _ = generate_reel_timeline(
+                self.media,
+                'captions shapes',
+                caption_mode='sentence',
+                reference_image_path='style.png',
+                visual_director=True,
+            )
+
+        analyzer.assert_called_once_with(self.media.file.path, 'captions shapes', reference_image_path='style.png')
+        caption = next(c for t in timeline['tracks'] for c in t['clips'] if c['type'] == 'caption')
+        self.assertEqual(caption['animationType'], 'sentence')
+        self.assertEqual([len(segment['words']) for segment in caption['segments']], [4, 2])
+        self.assertEqual(caption['style']['color'], '#FEDCBA')
+        card = next(c for t in timeline['tracks'] for c in t['clips'] if c['type'] == 'text' and '35%' in c.get('content', ''))
+        self.assertEqual(card['transform']['width'], 44)
+        self.assertEqual(card['style']['backgroundColor'], '#222222')
+        self.assertTrue(any('مشاهد توضيحية' in action for action in actions))
+
     def test_export_creates_decodable_video_with_audio_and_arabic(self):
         timeline,_,_=generate_reel_timeline(self.media,'keep original')
         self.assertFalse(parse_prompt('keep original')['add_captions'])

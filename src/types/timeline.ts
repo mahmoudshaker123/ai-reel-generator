@@ -255,7 +255,7 @@ export interface GlobalAudio {
 
 // ─── Project (Root) ───────────────────────────────────────────
 export interface Project {
-  storyPlan?: { summary: string; beats: { startTime: number; endTime: number; description: string }[] };
+  storyPlan?: { summary: string; beats: { startTime: number; endTime: number; description: string; layout?: string; headline?: string; statValue?: string; statLabel?: string }[] };
   id: string;
   version: number;
   title: string;

@@ -82,7 +82,7 @@ def parse_prompt(prompt_text: str):
     }
 
 
-def generate_reel_timeline(media_file: MediaFile, prompt_text: str, project_title: str = None):
+def generate_reel_timeline(media_file: MediaFile, prompt_text: str, project_title: str = None, caption_mode: str = 'sentence', reference_image_path: str = None, visual_director: bool = False):
     """
     Creates a full timeline JSON matching the frontend schema based on the prompt.
     Uses Google Gemini Multimodal AI when an API key is available.
@@ -102,12 +102,25 @@ def generate_reel_timeline(media_file: MediaFile, prompt_text: str, project_titl
     actions_taken = []
 
     gemini_data = None
-    if any(intents[k] for k in ('remove_silence', 'add_captions', 'add_shapes')):
-        res = analyze_video_with_gemini(file_path, prompt_text)
+    if any(intents[k] for k in ('remove_silence', 'add_captions', 'add_shapes')) or visual_director or reference_image_path:
+        res = analyze_video_with_gemini(file_path, prompt_text, reference_image_path=reference_image_path)
         if not res.get('success'):
             raise ValueError(res.get('message', 'تعذر تحليل الفيديو.'))
         gemini_data = res
         actions_taken.append(f"تم التحليل بواسطة {res.get('model')}")
+
+    design_style = (gemini_data or {}).get('design_style') or {}
+    def design_color(key, fallback):
+        value = str(design_style.get(key, ''))
+        return value.upper() if re.fullmatch(r'#[0-9A-Fa-f]{6}', value) else fallback
+
+    primary_color = design_color('primaryColor', '#E11D48')
+    accent_color = design_color('accentColor', '#8B5CF6')
+    caption_color = design_color('captionColor', '#FFFF00')
+    card_color = design_color('cardColor', '#111827')
+    card_rgb = tuple(int(card_color[index:index + 2], 16) for index in (1, 3, 5))
+    card_luminance = (0.2126 * card_rgb[0] + 0.7152 * card_rgb[1] + 0.0722 * card_rgb[2]) / 255
+    card_text_color = '#0F172A' if card_luminance > 0.62 else '#FFFFFF'
 
     # ── 1. Video Track & Silence Cutting ──────────────────────
     video_clips = []
@@ -236,7 +249,7 @@ def generate_reel_timeline(media_file: MediaFile, prompt_text: str, project_titl
                 'fontWeight': '900',
                 'fontStyle': 'normal',
                 'color': '#FFFFFF',
-                'backgroundColor': '#E11D48',
+                'backgroundColor': primary_color,
                 'backgroundOpacity': 0.95,
                 'backgroundPadding': 14,
                 'backgroundBorderRadius': 12,
@@ -284,7 +297,7 @@ def generate_reel_timeline(media_file: MediaFile, prompt_text: str, project_titl
                     'fontWeight': '700',
                     'fontStyle': 'normal',
                     'color': '#FFFFFF',
-                    'backgroundColor': '#8B5CF6',
+                    'backgroundColor': accent_color,
                     'backgroundOpacity': 0.9,
                     'backgroundPadding': 10,
                     'backgroundBorderRadius': 25,
@@ -326,8 +339,24 @@ def generate_reel_timeline(media_file: MediaFile, prompt_text: str, project_titl
                               'endTime': min(end, float(w['endTime'])) + offset}
                              for w in source.get('words', [])
                              if float(w['endTime']) > start and float(w['startTime']) < end]
-                    segments.append({'id': uuid.uuid4().hex, 'text': ' '.join(w['word'] for w in words) or source['text'],
-                                     'startTime': start + offset, 'endTime': end + offset, 'words': words})
+                    if words:
+                        for word_index in range(0, len(words), 4):
+                            line_words = words[word_index:word_index + 4]
+                            segments.append({
+                                'id': uuid.uuid4().hex,
+                                'text': ' '.join(w['word'] for w in line_words),
+                                'startTime': line_words[0]['startTime'],
+                                'endTime': line_words[-1]['endTime'],
+                                'words': line_words,
+                            })
+                    else:
+                        segments.append({
+                            'id': uuid.uuid4().hex,
+                            'text': source['text'],
+                            'startTime': start + offset,
+                            'endTime': end + offset,
+                            'words': [],
+                        })
 
         caption_clips.append({
             'id': cap_clip_id,
@@ -338,7 +367,7 @@ def generate_reel_timeline(media_file: MediaFile, prompt_text: str, project_titl
             'order': 0,
             'locked': False,
             'effects': [], 'animations': [], 'transitions': {},
-            'animationType': 'word_by_word',
+            'animationType': caption_mode if caption_mode in ('sentence', 'word_by_word') else 'sentence',
             'segments': segments,
             'style': {
                 'preset': 'highlight',
@@ -346,7 +375,7 @@ def generate_reel_timeline(media_file: MediaFile, prompt_text: str, project_titl
                 'fontSize': 64,
                 'fontWeight': '900',
                 'fontStyle': 'normal',
-                'color': '#FFFF00',  # Viral yellow
+                'color': caption_color,
                 'backgroundColor': '#000000',
                 'backgroundOpacity': 0.75,
                 'backgroundPadding': 14,
@@ -371,6 +400,78 @@ def generate_reel_timeline(media_file: MediaFile, prompt_text: str, project_titl
                 'cropTop': 0, 'cropBottom': 0, 'cropLeft': 0, 'cropRight': 0,
             },
         })
+
+    # ── 4. Visual Director cards ──────────────────────────────
+    visual_card_count = 0
+    if visual_director and gemini_data:
+        for beat_index, beat in enumerate(gemini_data.get('visual_beats', [])[:6]):
+            layout = str(beat.get('layout', '')).lower()
+            if layout not in ('split_card', 'stat_card'):
+                continue
+            headline = str(beat.get('headline') or beat.get('description') or '').strip()[:90]
+            stat_value = str(beat.get('stat_value') or '').strip()[:24]
+            stat_label = str(beat.get('stat_label') or '').strip()[:70]
+            if not headline and not stat_value:
+                continue
+            source_start = max(0.0, float(beat.get('startTime', 0)))
+            source_end = max(source_start, float(beat.get('endTime', source_start + 3)))
+            for video in video_clips:
+                overlap_start = max(source_start, float(video['trimStart']))
+                overlap_end = min(source_end, float(video['trimEnd']))
+                if overlap_end - overlap_start < 0.35:
+                    continue
+                offset = float(video['startTime']) - float(video['trimStart'])
+                card_start = round(overlap_start + offset, 2)
+                card_duration = round(min(5.5, overlap_end - overlap_start), 2)
+                content_parts = [part for part in (stat_value, headline, stat_label) if part]
+                text_clips.append({
+                    'id': f"clip_visual_{uuid.uuid4().hex[:6]}",
+                    'trackId': text_track_id,
+                    'type': 'text',
+                    'content': '\n'.join(content_parts),
+                    'startTime': card_start,
+                    'duration': card_duration,
+                    'order': len(text_clips),
+                    'locked': False,
+                    'effects': [],
+                    'animations': [],
+                    'transitions': {'in': {'type': 'slide_left' if beat_index % 2 else 'slide_right', 'duration': 0.35, 'easing': 'ease_out'}},
+                    'style': {
+                        'fontFamily': 'Cairo',
+                        'fontSize': 40 if stat_value else 34,
+                        'fontWeight': '800',
+                        'fontStyle': 'normal',
+                        'color': card_text_color,
+                        'backgroundColor': card_color,
+                        'backgroundOpacity': 0.92,
+                        'backgroundPadding': 18,
+                        'backgroundBorderRadius': 22,
+                        'stroke': {'color': accent_color, 'width': 1},
+                        'shadow': {'color': 'rgba(0,0,0,0.55)', 'offsetX': 0, 'offsetY': 8, 'blur': 20},
+                        'textAlign': 'center',
+                        'lineHeight': 1.35,
+                        'letterSpacing': 0,
+                        'direction': 'rtl',
+                    },
+                    'transform': {
+                        'x': -250 if beat_index % 2 else 250,
+                        'y': -40,
+                        'width': 44,
+                        'height': 42,
+                        'rotation': 0,
+                        'scaleX': 1,
+                        'scaleY': 1,
+                        'opacity': 1,
+                        'cropTop': 0,
+                        'cropBottom': 0,
+                        'cropLeft': 0,
+                        'cropRight': 0,
+                    },
+                })
+                visual_card_count += 1
+                break
+        if visual_card_count:
+            actions_taken.append(f"تم إنشاء {visual_card_count} مشاهد توضيحية جانبية مرتبطة بالكلام.")
 
     # ── Final Timeline Assemble ───────────────────────────────
     tracks = [
@@ -414,6 +515,10 @@ def generate_reel_timeline(media_file: MediaFile, prompt_text: str, project_titl
                 'startTime': round(overlap_start + offset, 2),
                 'endTime': round(overlap_end + offset, 2),
                 'description': str(beat.get('description', 'لحظة من الفيديو'))[:180],
+                'layout': str(beat.get('layout', 'full'))[:30],
+                'headline': str(beat.get('headline', ''))[:90],
+                'statValue': str(beat.get('stat_value', ''))[:24],
+                'statLabel': str(beat.get('stat_label', ''))[:70],
             })
 
     title = project_title or (f"ريل {gemini_data['hook_title'][:25]}" if gemini_data and gemini_data.get('hook_title') else f"ريل ذكي — {prompt_text[:28]}..." if prompt_text else "ريل احترافي جديد")
@@ -434,6 +539,11 @@ def generate_reel_timeline(media_file: MediaFile, prompt_text: str, project_titl
         'globalAudio': {'masterVolume': 1.0},
         'settings': {
             'backgroundColor': '#000000',
+            'brandKit': {
+                'primaryColor': primary_color,
+                'secondaryColor': accent_color,
+                'fontFamily': 'Cairo',
+            },
             'exportPreset': {
                 'resolution': '1080x1920',
                 'width': 1080, 'height': 1920,

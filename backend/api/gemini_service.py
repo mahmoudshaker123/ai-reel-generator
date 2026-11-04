@@ -120,7 +120,7 @@ def extract_audio(video_path: str) -> str:
         return ''
 
 
-def analyze_video_with_gemini(video_path: str, prompt_text: str = '') -> dict:
+def analyze_video_with_gemini(video_path: str, prompt_text: str = '', reference_image_path: str = None) -> dict:
     """Analyze both the picture and the speech for a directed short-form edit."""
     api_key = get_gemini_api_key()
     if not api_key:
@@ -144,13 +144,20 @@ def analyze_video_with_gemini(video_path: str, prompt_text: str = '') -> dict:
                 raise RuntimeError('تعذر تجهيز ملف الفيديو لدى Gemini. جرّب ملفًا أصغر أو بصيغة MP4.')
             video_content = uploaded_video
 
+        reference_content = None
+        if reference_image_path:
+            reference = Path(reference_image_path)
+            reference_mime = mimetypes.guess_type(reference.name)[0] or 'image/jpeg'
+            reference_content = types.Part.from_bytes(data=reference.read_bytes(), mime_type=reference_mime)
+
         system_instruction = (
             "أنت مخرج ريلز عربي. شاهد الفيديو واسمع صوته كاملًا، ولا تخترع أي كلام أو مشاهد.\n"
             "فرّغ الكلام العربي كلمة بكلمة مع توقيت كل كلمة والجمل، واكتشف فقط فترات الصمت الواضحة الأطول من 0.3 ثانية.\n"
-            "صف 3 إلى 6 لحظات مرئية فعلية بتوقيتها لاستخدامها كخطة مشاهد. اقترح hook وCTA مطابقين للمحتوى، ولا تضف عناصر تخفي وجه المتحدث.\n"
+            "صف 3 إلى 6 لحظات مرئية فعلية بتوقيتها لاستخدامها كخطة مشاهد. للمقاطع التفسيرية اقترح split_card أو stat_card مع عنوان قصير، ولا تستخدم رقمًا غير مذكور فعلاً. اقترح hook وCTA مطابقين للمحتوى، ولا تضف عناصر تخفي وجه المتحدث.\n"
+            "إذا أُرفقت صورة بعد الفيديو فهي مرجع تصميم فقط: استخرج منها لوحة ألوان واضحة ولا تعتبر محتواها جزءًا من الفيديو.\n"
             "أعد JSON فقط بالشكل: {segments:[{text,startTime,endTime,words:[{word,startTime,endTime}]}],"
-            "silence_intervals:[{startTime,endTime}],visual_beats:[{startTime,endTime,description}],"
-            "hook_title,cta_text,summary}. جميع الأوقات بالثواني من بداية المصدر."
+            "silence_intervals:[{startTime,endTime}],visual_beats:[{startTime,endTime,description,layout,headline,stat_value,stat_label}],"
+            "design_style:{primaryColor,accentColor,captionColor,cardColor},hook_title,cta_text,summary}. جميع الأوقات بالثواني من بداية المصدر."
         )
         user_content = (
             f"طلب صاحب الفيديو: {prompt_text or 'احذف التوقفات الواضحة، أضف كابشن عربي دقيق، وخطة مشاهد وهوك مناسب.'}\n"
@@ -159,8 +166,12 @@ def analyze_video_with_gemini(video_path: str, prompt_text: str = '') -> dict:
         last_error = None
         for model_name in ACTIVE_MODELS:
             try:
+                contents = [video_content]
+                if reference_content:
+                    contents.append(reference_content)
+                contents.append(user_content)
                 response = client.models.generate_content(
-                    model=model_name, contents=[video_content, user_content],
+                    model=model_name, contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
                         response_mime_type='application/json', temperature=0.2,
@@ -173,6 +184,7 @@ def analyze_video_with_gemini(video_path: str, prompt_text: str = '') -> dict:
                         'segments': data.get('segments', []),
                         'silence_intervals': data.get('silence_intervals', []),
                         'visual_beats': data.get('visual_beats', []),
+                        'design_style': data.get('design_style', {}),
                         'hook_title': data.get('hook_title', ''),
                         'cta_text': data.get('cta_text', ''),
                         'summary': data.get('summary', ''),

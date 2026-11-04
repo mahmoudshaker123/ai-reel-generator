@@ -100,13 +100,24 @@ export interface GenerateReelResponse {
 
 // ─── Unified One-Shot AI Reel Generator ──────────────────────────────────────
 export const apiGenerateReel = async (
-  input: { video?: File; prompt: string; title?: string; media_file_id?: string }
+  input: {
+    video?: File;
+    prompt: string;
+    title?: string;
+    media_file_id?: string;
+    caption_mode?: 'sentence' | 'word_by_word';
+    reference_image?: File;
+    visual_director?: boolean;
+  }
 ): Promise<GenerateReelResponse> => {
   const form = new FormData();
   if (input.video) form.append('video', input.video);
   if (input.prompt) form.append('prompt', input.prompt);
   if (input.title) form.append('title', input.title);
   if (input.media_file_id) form.append('media_file_id', input.media_file_id);
+  if (input.caption_mode) form.append('caption_mode', input.caption_mode);
+  if (input.reference_image) form.append('reference_image', input.reference_image);
+  form.append('visual_director', input.visual_director === false ? 'false' : 'true');
 
   const res = await fetch(`${BASE_URL}/generate-reel/`, {
     method: 'POST',

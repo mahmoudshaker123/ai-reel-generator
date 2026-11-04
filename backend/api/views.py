@@ -499,6 +499,11 @@ def generate_reel_view(request):
     prompt_text = request.data.get('prompt', 'شيل الفراغات واضف كابشن واشكال وهوك جذاب')
     title = request.data.get('title')
     aspect_ratio = request.data.get('aspect_ratio', '9:16')
+    caption_mode = request.data.get('caption_mode', 'sentence')
+    if caption_mode not in ('sentence', 'word_by_word'):
+        caption_mode = 'sentence'
+    visual_director = str(request.data.get('visual_director', 'true')).lower() not in ('0', 'false', 'no')
+    reference_obj = request.FILES.get('reference_image')
 
     media_file = None
 
@@ -523,11 +528,36 @@ def generate_reel_view(request):
     else:
         return Response({'error': 'اختر فيديو أولاً.'}, status=400)
 
+    reference_media = None
+    if reference_obj:
+        reference_ext = os.path.splitext(reference_obj.name)[1].lower()
+        if reference_obj.size > 10 * 1024 * 1024 or reference_ext not in ('.png', '.jpg', '.jpeg', '.webp'):
+            return Response({'error': 'اختر صورة مرجعية PNG أو JPG أو WebP لا تتجاوز 10 MB.'}, status=400)
+        reference_mime, _ = mimetypes.guess_type(reference_obj.name)
+        reference_media = MediaFile.objects.create(
+            media_type='image',
+            status='ready',
+            original_name=reference_obj.name,
+            file=reference_obj,
+            size=reference_obj.size,
+            mime_type=reference_mime or 'image/jpeg',
+        )
+
     if not media_file.duration:
         return Response({'error': 'تعذر قراءة مدة الفيديو. اختر ملف فيديو صالحًا.'}, status=400)
     try:
-        timeline, actions_taken, intents = generate_reel_timeline(media_file, prompt_text, title)
+        timeline, actions_taken, intents = generate_reel_timeline(
+            media_file,
+            prompt_text,
+            title,
+            caption_mode=caption_mode,
+            reference_image_path=reference_media.file.path if reference_media else None,
+            visual_director=visual_director,
+        )
     except ValueError as error:
+        if reference_media:
+            reference_media.file.delete(save=False)
+            reference_media.delete()
         return Response({'error': str(error)}, status=422)
 
     # 1. Create Project
@@ -540,6 +570,9 @@ def generate_reel_view(request):
         media_file.pk = None
     media_file.project = project
     media_file.save()
+    if reference_media:
+        reference_media.project = project
+        reference_media.save()
 
     # 3. Update project record
     timeline['id'] = str(project.id)

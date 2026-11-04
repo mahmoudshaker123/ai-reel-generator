@@ -162,7 +162,8 @@ export function PreviewArea() {
           ctx.translate(canvas.width/2+clip.transform.x,canvas.height/2+clip.transform.y);
           ctx.rotate(clip.transform.rotation*Math.PI/180);
           ctx.scale(clip.transform.scaleX,clip.transform.scaleY);
-          drawText(ctx,text,clip.style,0,0,canvas.width*.86,clip.type==='text' || clip.style.showBackground);
+          const textWidth = canvas.width * Math.min(0.9, Math.max(0.2, clip.transform.width / 100));
+          drawText(ctx,text,clip.style,0,0,textWidth,clip.type==='text' || clip.style.showBackground);
           ctx.restore();
         }
 

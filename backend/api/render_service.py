@@ -133,7 +133,8 @@ def render(job_id):
                         if b <= a or not segment.get('text'):
                             continue
                         png = Path(temp) / f'{idx}.png'
-                        text_sprite(segment['text'], clip.get('style',{}), png, int(width*.9), sx)
+                        transform_width = max(.2, min(.9, float(clip.get('transform', {}).get('width', 90)) / 100))
+                        text_sprite(segment['text'], clip.get('style',{}), png, int(width * transform_width), sx)
                         args += ['-loop','1','-t',str(duration),'-i',str(png)]
                         overlay(f'{idx}:v', clip, a, b); idx += 1
             filters.append(''.join(f'[{a}]' for a in audio)+f'amix=inputs={len(audio)}:duration=longest:normalize=0,alimiter=limit=0.95[aout]')

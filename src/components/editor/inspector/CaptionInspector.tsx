@@ -131,6 +131,30 @@ export function CaptionInspector({ clip }: Props) {
         <span>اسحب الكابشن بالماوس مباشرة فوق شاشة الفيديو لتغيير مكانه بسهولة!</span>
       </div>
 
+      <SectionHeader label="طريقة الظهور" />
+      <div role="group" aria-label="طريقة ظهور الكابشن" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 10 }}>
+        {([
+          { id: 'sentence', label: 'سطر كامل', hint: 'الجملة تظهر معًا' },
+          { id: 'word_by_word', label: 'كلمة بكلمة', hint: 'كل كلمة بتوقيتها' },
+        ] as const).map(mode => (
+          <button
+            key={mode.id}
+            type="button"
+            onClick={() => update({ animationType: mode.id })}
+            aria-pressed={clip.animationType === mode.id}
+            style={{
+              padding: '9px 7px', borderRadius: 9, cursor: 'pointer', textAlign: 'center',
+              border: `1px solid ${clip.animationType === mode.id ? 'var(--brand-primary)' : 'var(--bg-border)'}`,
+              background: clip.animationType === mode.id ? 'rgba(139,92,246,.18)' : 'var(--bg-elevated)',
+              color: clip.animationType === mode.id ? '#fff' : 'var(--text-secondary)',
+            }}
+          >
+            <b style={{ display: 'block', fontSize: 11 }}>{mode.label}</b>
+            <small style={{ display: 'block', marginTop: 3, fontSize: 9, color: 'var(--text-muted)' }}>{mode.hint}</small>
+          </button>
+        ))}
+      </div>
+
       {/* ── Segments Text List ── */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 12, marginBottom: 6 }}>
         <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)' }}>الجمل والنصوص:</div>
