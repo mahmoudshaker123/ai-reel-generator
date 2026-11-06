@@ -71,3 +71,7 @@ node_modules/
 playwright-report/
 test-results/
 *.tsbuildinfo
+test_*.png
+sample_*.png
+Screenshot *.png
+.agents/

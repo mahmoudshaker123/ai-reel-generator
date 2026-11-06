@@ -11,9 +11,12 @@ import { useHistoryStore } from '@/stores/historyStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { formatTime } from '@/lib/utils';
-import { apiGenerateReel, apiGemini } from '@/lib/api';
+import { apiGenerateReel } from '@/lib/api';
 import { Project } from '@/types/timeline';
-import { GeminiKeyModal } from '@/components/modals/GeminiKeyModal';
+import { AuthModal } from '@/components/modals/AuthModal';
+import { AccountSettingsModal } from '@/components/modals/AccountSettingsModal';
+import { UserAccountMenu } from '@/components/account/UserAccountMenu';
+import { useAuthStore } from '@/stores/authStore';
 
 export function EditorToolbar() {
   const router = useRouter();
@@ -31,21 +34,7 @@ export function EditorToolbar() {
   const [promptInput, setPromptInput] = useState('');
   const [isPromptRunning, setIsPromptRunning] = useState(false);
   const [successBadge, setSuccessBadge] = useState(false);
-  const [showGeminiModal, setShowGeminiModal] = useState(false);
-  const [geminiStatus, setGeminiStatus] = useState<{ configured: boolean } | null>(null);
-
-  useEffect(() => {
-    checkGemini();
-  }, []);
-
-  async function checkGemini() {
-    try {
-      const res = await apiGemini.getStatus();
-      setGeminiStatus(res);
-    } catch {
-      // ignore
-    }
-  }
+  const { user, openAuthModal, isAuthModalOpen, closeAuthModal, isSettingsModalOpen, closeSettingsModal } = useAuthStore();
 
   function handleUndo() {
     undo((prev) => initProject(prev));
@@ -227,22 +216,10 @@ export function EditorToolbar() {
           )}
         </div>
 
-        {/* Gemini API AI Status Button */}
-        <button
-          onClick={() => setShowGeminiModal(true)}
-          className="btn btn-sm"
-          style={{
-            gap: 6, padding: '0 12px', height: 32, borderRadius: 8,
-            background: geminiStatus?.configured ? 'rgba(139, 92, 246, 0.15)' : 'rgba(245, 158, 11, 0.15)',
-            border: `1px solid ${geminiStatus?.configured ? 'rgba(139, 92, 246, 0.4)' : 'rgba(245, 158, 11, 0.4)'}`,
-            color: geminiStatus?.configured ? '#C4B5FD' : '#FCD34D',
-            fontSize: 11, fontWeight: 700,
-          }}
-          title="إعدادات اشتراك Gemini API"
-        >
-          <Sparkles size={13} color={geminiStatus?.configured ? '#A78BFA' : '#F59E0B'} />
-          <span>{geminiStatus?.configured ? 'Gemini API نشط' : 'تفعيل Gemini API'}</span>
-        </button>
+        {/* Enhanced User Account Menu */}
+        <UserAccountMenu
+          theme="dark"
+        />
 
         {/* Export Button */}
         <button
@@ -255,10 +232,14 @@ export function EditorToolbar() {
         </button>
       </div>
 
-      <GeminiKeyModal
-        isOpen={showGeminiModal}
-        onClose={() => setShowGeminiModal(false)}
-        onSuccess={() => checkGemini()}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={closeAuthModal}
+        onSuccess={() => {}}
+      />
+      <AccountSettingsModal
+        isOpen={isSettingsModalOpen}
+        onClose={closeSettingsModal}
       />
     </div>
   );

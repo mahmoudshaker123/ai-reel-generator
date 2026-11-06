@@ -1,15 +1,19 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Keep API and media on the frontend origin, including on mobile devices.
+  // Keep media on the frontend origin, including on mobile devices.
   skipTrailingSlashRedirect: true,
   async rewrites() {
+    const backend = process.env.BACKEND_URL || 'http://127.0.0.1:8002';
     return [
       {
         source: '/media/:path*',
-        destination: `${process.env.BACKEND_URL || 'http://127.0.0.1:8002'}/media/:path*`,
+        destination: `${backend}/media/:path*`,
       },
-      { source: '/api/:path*', destination: `${process.env.BACKEND_URL || 'http://127.0.0.1:8002'}/api/:path*/` },
+      {
+        source: '/api/:path*',
+        destination: `${backend}/api/:path*`,
+      },
     ];
   },
 };

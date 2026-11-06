@@ -22,7 +22,10 @@ function getClipLabel(clip: Clip): string {
   if (clip.type === 'audio') return (clip as AudioClip).label ?? 'Audio';
   if (clip.type === 'text') return truncate(clip.content, 20);
   if (clip.type === 'caption') return 'Captions';
-  if (clip.type === 'image') return 'Image';
+  if (clip.type === 'image') {
+    const raw = (clip as unknown as { mediaUrl?: string }).mediaUrl?.split('/').pop()?.replace(/^infographic_/, '')?.replace(/\.[^.]+$/, '');
+    return raw ? `تصميم: ${decodeURIComponent(raw).slice(0, 16)}` : 'تصميم توضيحي';
+  }
   return 'Clip';
 }
 

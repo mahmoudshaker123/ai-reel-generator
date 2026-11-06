@@ -214,7 +214,7 @@ export function ExportModal() {
               </div>
               <div style={{ textAlign: 'center' }}>
                 <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }} dir="rtl">
-                  جاري تصدير الفيديو على سيرفر Django...
+                  جاري تصدير الفيديو....
                 </div>
                 <div style={{ fontSize: 11, color: 'var(--text-muted)' }} dir="rtl">
                   يتم دمج المسارات والمؤثرات وتوليد ملف MP4 النهائي

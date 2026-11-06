@@ -12,11 +12,25 @@ from django.utils import timezone
 from .models import RenderJob, MediaFile
 from .media_tools import probe
 
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+    def reshape_ar(t):
+        if not t:
+            return ''
+        return get_display(arabic_reshaper.reshape(str(t)))
+except ImportError:
+    def reshape_ar(t):
+        return t
+
 
 def text_sprite(text, style, path, width, scale):
     font_path = os.environ.get('REEL_FONT_PATH')
+    cairo_font = Path(__file__).resolve().parent / 'fonts' / 'Cairo-Bold.ttf'
+    if not font_path and cairo_font.exists():
+        font_path = str(cairo_font)
     if not font_path:
-        font_path = next((p for p in ['C:/Windows/Fonts/arial.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'] if Path(p).exists()), None)
+        font_path = next((p for p in ['C:/Windows/Fonts/tahoma.ttf', 'C:/Windows/Fonts/arial.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'] if Path(p).exists()), None)
     if not font_path:
         raise ValueError('Configure REEL_FONT_PATH to a font supporting Arabic.')
     size = max(8, int(style.get('fontSize', 48) * scale))
@@ -28,14 +42,14 @@ def text_sprite(text, style, path, width, scale):
         line = ''
         for word in paragraph.split():
             candidate = f'{line} {word}'.strip()
-            if line and measure.textlength(candidate, font=font) > width - pad * 2:
+            if line and measure.textlength(reshape_ar(candidate), font=font) > width - pad * 2:
                 lines.append(line)
                 line = word
             else:
                 line = candidate
         lines.append(line)
     line_h = int(size * style.get('lineHeight', 1.4))
-    width = min(width, max(1, int(max(measure.textlength(line, font=font) for line in lines)) + pad * 2))
+    width = min(width, max(1, int(max(measure.textlength(reshape_ar(line), font=font) for line in lines)) + pad * 2))
     image = Image.new('RGBA', (width, line_h * len(lines) + pad * 2))
     draw = ImageDraw.Draw(image)
     if style.get('showBackground', True) and style.get('backgroundColor', 'transparent') != 'transparent':
@@ -43,7 +57,7 @@ def text_sprite(text, style, path, width, scale):
         draw.rounded_rectangle((0, 0, image.width-1, image.height-1), radius=int(style.get('backgroundBorderRadius', 8)*scale),
                                fill=(*color, int(255 * style.get('backgroundOpacity', .8))))
     for i, line in enumerate(lines):
-        draw.text((width/2, pad + i*line_h), line, font=font, anchor='mt', fill=style.get('color', '#ffffff'),
+        draw.text((width/2, pad + i*line_h), reshape_ar(line), font=font, anchor='mt', fill=style.get('color', '#ffffff'),
                   stroke_width=int(style.get('stroke', {}).get('width', 0)*scale),
                   stroke_fill=style.get('stroke', {}).get('color', '#000000'))
     image.save(path)

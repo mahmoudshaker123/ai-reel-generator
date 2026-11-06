@@ -32,6 +32,7 @@ MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'api.middleware.NormalizeSlashMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -91,11 +92,15 @@ MEDIA_ROOT = BASE_DIR / 'media'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # ─── CORS Configuration ────────────────────────────────────────
-CORS_ALLOW_ALL_ORIGINS = False   # Dev only — restrict in prod
+CORS_ALLOW_ALL_ORIGINS = True   # Dev only — restrict in prod
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = ['http://localhost:3000', 'http://127.0.0.1:3000']
-CORS_ALLOWED_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
-CORS_ALLOWED_HEADERS = [
+from corsheaders.defaults import default_headers, default_methods
+CORS_ALLOW_METHODS = list(default_methods)
+CORS_ALLOWED_METHODS = CORS_ALLOW_METHODS
+CORS_ALLOW_HEADERS = list(default_headers) + ['accept-encoding', 'dnt', 'origin', 'x-user-email']
+CORS_ALLOWED_HEADERS = CORS_ALLOW_HEADERS
+_OLD_UNUSED_HEADERS = [
     'accept',
     'accept-encoding',
     'authorization',
@@ -105,6 +110,7 @@ CORS_ALLOWED_HEADERS = [
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
+    'x-user-email',
 ]
 
 # ─── DRF Configuration ────────────────────────────────────────

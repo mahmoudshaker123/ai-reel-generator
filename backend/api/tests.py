@@ -5,7 +5,8 @@ from unittest.mock import patch
 import imageio_ffmpeg
 from django.test import TransactionTestCase, override_settings
 from django.core.files import File
-from .models import Project, MediaFile, RenderJob
+from django.contrib.auth.models import User
+from .models import Project, MediaFile, RenderJob, UserSubscription, SubscriptionOrder
 from .reel_generator import generate_reel_timeline, parse_prompt
 from .media_tools import probe
 from .render_service import render
@@ -181,7 +182,227 @@ class StudioTests(TransactionTestCase):
         self.assertEqual(caption['style']['backgroundOpacity'], 0)
         self.assertTrue(response.data['changed'])
 
+    @patch('api.views.get_gemini_api_key', return_value='local-test-key')
+    @patch('api.views.genai.Client')
+    def test_director_applies_visual_card_and_split_layout(self, client_factory, _key):
+        import json
+        from unittest.mock import MagicMock
+        timeline = {
+            'id': str(self.project.id), 'title': 'Visual test', 'duration': 6,
+            'tracks': [
+                {'id': 'video', 'type': 'video', 'clips': [
+                    {'id': 'v1', 'type': 'video', 'startTime': 0, 'duration': 6, 'transform': {'x': 0, 'y': 0, 'width': 100, 'height': 100}}
+                ]},
+                {'id': 'text', 'type': 'text', 'clips': []},
+            ],
+        }
+        self.project.timeline_json = timeline
+        self.project.save(update_fields=['timeline_json'])
+        client = MagicMock()
+        client.models.generate_content.return_value.text = json.dumps({
+            'message': 'تم إضافة كارت توضيحي وتقسيم المشهد',
+            'edits': [
+                {'type': 'split_layout', 'value': 'side'},
+                {'type': 'add_visual_card', 'value': {
+                    'headline': 'نقص تشبع الأكسجين',
+                    'stat_value': '85%',
+                    'stat_label': 'نسبة الأكسجين بالدم',
+                    'startTime': 1.5,
+                    'duration': 3.5,
+                    'position': 'left',
+                }},
+            ],
+        }, ensure_ascii=False)
+        client_factory.return_value = client
+
+        response = self.client.post(
+            f'/api/projects/{self.project.id}/director/',
+            {'prompt': 'اعمل كارت توضيحي وقسم الشاشة'}, format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['changed'])
+        video_clip = response.data['timeline']['tracks'][0]['clips'][0]
+        self.assertEqual(video_clip['transform']['x'], 180)
+        self.assertEqual(video_clip['transform']['width'], 60)
+        text_clips = response.data['timeline']['tracks'][1]['clips']
+        self.assertEqual(len(text_clips), 1)
+        self.assertIn('85%', text_clips[0]['content'])
+        self.assertIn('■■■■■■■■■□', text_clips[0]['content'])
+        self.assertEqual(text_clips[0]['transform']['x'], -240)
+        client.close.assert_called_once()
+
     def test_export_failure_does_not_return_fake_download(self):
         job=RenderJob.objects.create(project=self.project,timeline_snapshot={'duration':1,'tracks':[]},resolution='720x1280',fps=30,format='mp4')
         render(str(job.id));job.refresh_from_db()
         self.assertEqual(job.status,'failed');self.assertFalse(job.output_url)
+
+    @patch('api.gemini_service.get_gemini_api_key', return_value='test-key')
+    @patch('api.views.genai.Client')
+    def test_director_generates_infographic_image_and_split_screen(self, client_factory, _key):
+        timeline = {
+            'id': str(self.project.id), 'title': 'Split Screen Test', 'duration': 8,
+            'tracks': [
+                {'id': 'video', 'type': 'video', 'clips': [
+                    {'id': 'v1', 'type': 'video', 'startTime': 0, 'duration': 8, 'transform': {'x': 0, 'y': 0, 'width': 100, 'height': 100}}
+                ]},
+            ],
+        }
+        self.project.timeline_json = timeline
+        self.project.save(update_fields=['timeline_json'])
+
+        response = self.client.post(
+            f'/api/projects/{self.project.id}/director/',
+            {'prompt': 'اعمل صور توضح اللي بيشرحه واقسم الشاشه'}, format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['changed'])
+
+        # Check video was split to bottom 50%
+        v_clip = response.data['timeline']['tracks'][0]['clips'][0]
+        self.assertEqual(v_clip['transform']['y'], 480)
+        self.assertEqual(v_clip['transform']['height'], 50)
+
+        # Check image track was created and has an image clip in top 50%
+        img_track = next((t for t in response.data['timeline']['tracks'] if t['type'] == 'image'), None)
+        self.assertIsNotNone(img_track)
+        self.assertTrue(len(img_track['clips']) >= 1)
+        img_clip = img_track['clips'][0]
+        self.assertEqual(img_clip['type'], 'image')
+        self.assertEqual(img_clip['transform']['y'], -480)
+        self.assertEqual(img_clip['transform']['height'], 50)
+        self.assertTrue(img_clip['mediaUrl'].endswith('.png'))
+
+    def test_auth_google_direct_profile(self):
+        response = self.client.post('/api/auth/google/', {
+            'email': 'creator_direct@gmail.com',
+            'name': 'Direct Creator',
+            'avatar': 'https://avatar.test/pic.png',
+        }, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['status'], 'success')
+        self.assertEqual(response.data['user']['email'], 'creator_direct@gmail.com')
+        self.assertEqual(response.data['user']['name'], 'Direct Creator')
+
+        # Check session / auth_me
+        me_res = self.client.get('/api/auth/me/')
+        self.assertEqual(me_res.status_code, 200)
+        self.assertTrue(me_res.data['authenticated'])
+        self.assertEqual(me_res.data['user']['email'], 'creator_direct@gmail.com')
+
+    def test_auth_google_jwt_credential(self):
+        import base64
+        import json
+        payload = json.dumps({
+            'email': 'oauth_creator@gmail.com',
+            'name': 'OAuth Google User',
+            'picture': 'https://lh3.googleusercontent.com/test.jpg',
+        })
+        payload_b64 = base64.urlsafe_b64encode(payload.encode()).decode().rstrip('=')
+        mock_jwt = f"fakeheader.{payload_b64}.fakesignature"
+
+        response = self.client.post('/api/auth/google/', {
+            'credential': mock_jwt,
+        }, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['status'], 'success')
+        self.assertEqual(response.data['user']['email'], 'oauth_creator@gmail.com')
+        self.assertEqual(response.data['user']['name'], 'OAuth Google User')
+        self.assertEqual(response.data['user']['avatar'], 'https://lh3.googleusercontent.com/test.jpg')
+
+    def test_auth_logout(self):
+        # Sign in first
+        self.client.post('/api/auth/google/', {'email': 'logout_test@gmail.com'}, format='json')
+        # Confirm logged in
+        me1 = self.client.get('/api/auth/me/')
+        self.assertTrue(me1.data['authenticated'])
+        # Logout
+        out_res = self.client.post('/api/auth/logout/')
+        self.assertEqual(out_res.status_code, 200)
+        # Confirm logged out
+        me2 = self.client.get('/api/auth/me/')
+        self.assertFalse(me2.data['authenticated'])
+
+    def test_user_project_isolation(self):
+        u1 = User.objects.create(username='u1_creator', email='u1@test.com')
+        u2 = User.objects.create(username='u2_creator', email='u2@test.com')
+
+        # Create project for user 1
+        p1 = self.client.post('/api/projects/', {'title': 'مشروع المستخدم الأول'}, format='json', HTTP_X_USER_EMAIL='u1@test.com')
+        self.assertEqual(p1.status_code, 201)
+
+        # Create project for user 2
+        p2 = self.client.post('/api/projects/', {'title': 'مشروع المستخدم الثاني'}, format='json', HTTP_X_USER_EMAIL='u2@test.com')
+        self.assertEqual(p2.status_code, 201)
+
+        # User 1 lists projects -> only see user 1's project
+        list_u1 = self.client.get('/api/projects/', HTTP_X_USER_EMAIL='u1@test.com')
+        self.assertEqual(list_u1.status_code, 200)
+        titles_u1 = [p['title'] for p in list_u1.data['data']]
+        self.assertIn('مشروع المستخدم الأول', titles_u1)
+        self.assertNotIn('مشروع المستخدم الثاني', titles_u1)
+
+        # User 2 lists projects -> only see user 2's project
+        list_u2 = self.client.get('/api/projects/', HTTP_X_USER_EMAIL='u2@test.com')
+        self.assertEqual(list_u2.status_code, 200)
+        titles_u2 = [p['title'] for p in list_u2.data['data']]
+        self.assertIn('مشروع المستخدم الثاني', titles_u2)
+        self.assertNotIn('مشروع المستخدم الأول', titles_u2)
+
+    def test_auth_update_profile(self):
+        u = User.objects.create(username='edit_user', email='edit_user@test.com', first_name='Old Name')
+        res = self.client.post('/api/auth/profile/', {'name': 'New Creator Name'}, format='json', HTTP_X_USER_EMAIL='edit_user@test.com')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['user']['name'], 'New Creator Name')
+        u.refresh_from_db()
+        self.assertEqual(u.first_name, 'New Creator Name')
+
+    def test_subscription_plans_endpoint(self):
+        res = self.client.get('/api/subscriptions/plans/')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['status'], 'success')
+        self.assertTrue(len(res.data['plans']) >= 4)
+        self.assertIn('vodafone_cash', res.data['payment_info'])
+
+    def test_free_quota_exceeded_blocks_generation(self):
+        u = User.objects.create(username='quota_user', email='quota@test.com')
+        sub = UserSubscription.objects.create(user=u, plan='free', video_credits_total=3, video_credits_used=3)
+        self.assertFalse(sub.can_generate)
+
+        # Try to generate reel
+        res = self.client.post('/api/generate-reel/', {
+            'prompt': 'فيديو تجريبي',
+        }, format='multipart', HTTP_X_USER_EMAIL='quota@test.com')
+        self.assertEqual(res.status_code, 402)
+        self.assertEqual(res.data['error_code'], 'quota_exceeded')
+        self.assertIn('/pricing', res.data['upgrade_url'])
+
+    def test_subscription_checkout_and_admin_approve(self):
+        u = User.objects.create(username='buyer_user', email='buyer@test.com')
+        checkout_res = self.client.post('/api/subscriptions/checkout/', {
+            'plan_id': 'pro',
+            'plan_title': 'باقة المحترف (Pro)',
+            'amount': '590.00',
+            'payment_method': 'vodafone_cash',
+            'sender_phone': '01012345678',
+            'transaction_reference': 'TX-998877',
+            'notes': 'تم التحويل من محفظة فودافون كاش',
+        }, format='multipart', HTTP_X_USER_EMAIL='buyer@test.com')
+
+        self.assertEqual(checkout_res.status_code, 201)
+        order_id = checkout_res.data['order_id']
+        order = SubscriptionOrder.objects.get(id=order_id)
+        self.assertEqual(order.status, 'pending')
+
+        # Admin approves order
+        approve_res = self.client.post(f'/api/subscriptions/admin/orders/{order_id}/action/', {
+            'action': 'approve',
+        }, format='json')
+        self.assertEqual(approve_res.status_code, 200)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'approved')
+
+        sub = UserSubscription.objects.get(user=u)
+        self.assertEqual(sub.plan, 'pro')
+        self.assertEqual(sub.video_credits_total, 100)
+        self.assertTrue(sub.can_generate)

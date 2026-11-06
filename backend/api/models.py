@@ -186,3 +186,102 @@ class AIJob(models.Model):
 
     def __str__(self):
         return f'AIJob({self.job_type}) [{self.status}]'
+
+
+# ─── User Subscription & Quota ─────────────────────────────────
+class UserSubscription(models.Model):
+    PLAN_CHOICES = [
+        ('free',    'الباقة التجريبية المجانية'),
+        ('starter', 'باقة صناع المحتوى (Starter)'),
+        ('pro',     'باقة المحترف (Pro Creator)'),
+        ('agency',  'باقة الوكالات والإنتاج (Agency)'),
+    ]
+
+    id                  = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user                = models.OneToOneField(User, on_delete=models.CASCADE, related_name='subscription')
+    plan                = models.CharField(max_length=20, choices=PLAN_CHOICES, default='free')
+    video_credits_total = models.IntegerField(default=3)   # Free starts with 3 reels
+    video_credits_used  = models.IntegerField(default=0)
+    is_unlimited        = models.BooleanField(default=False)
+    created_at          = models.DateTimeField(auto_now_add=True)
+    updated_at          = models.DateTimeField(auto_now=True)
+
+    @property
+    def remaining_credits(self):
+        if self.is_unlimited:
+            return 999999
+        return max(0, self.video_credits_total - self.video_credits_used)
+
+    @property
+    def can_generate(self):
+        return self.is_unlimited or self.remaining_credits > 0
+
+    def use_credit(self):
+        if not self.is_unlimited:
+            self.video_credits_used += 1
+            self.save(update_fields=['video_credits_used', 'updated_at'])
+
+    def __str__(self):
+        return f"{self.user.username} - {self.get_plan_display()} ({self.remaining_credits} credits left)"
+
+
+# ─── Subscription Order & Payment Receipt ────────────────────
+class SubscriptionOrder(models.Model):
+    STATUS_CHOICES = [
+        ('pending',  'قيد المراجعة (Pending)'),
+        ('approved', 'تمت الموافقة والتفعيل (Approved)'),
+        ('rejected', 'مرفوض (Rejected)'),
+    ]
+    PAYMENT_METHODS = [
+        ('vodafone_cash', 'فودافون كاش (Vodafone Cash)'),
+        ('instapay',      'إنستاباي (InstaPay)'),
+        ('bank_transfer', 'تحويل بنكي (Bank Transfer)'),
+    ]
+
+    id                    = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user                  = models.ForeignKey(User, on_delete=models.CASCADE, related_name='subscription_orders')
+    plan_id               = models.CharField(max_length=20)  # starter, pro, agency
+    plan_title            = models.CharField(max_length=100)
+    amount                = models.DecimalField(max_digits=10, decimal_places=2)
+    currency              = models.CharField(max_length=10, default='EGP')
+    payment_method        = models.CharField(max_length=30, choices=PAYMENT_METHODS, default='vodafone_cash')
+    sender_phone          = models.CharField(max_length=50) # Transfer phone / wallet
+    transaction_reference = models.CharField(max_length=100, blank=True, default='')
+    receipt_image         = models.ImageField(upload_to='receipts/%Y/%m/', blank=True, null=True)
+    notes                 = models.TextField(blank=True, default='')
+    status                = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    admin_notes           = models.TextField(blank=True, default='')
+    created_at            = models.DateTimeField(auto_now_add=True)
+    updated_at            = models.DateTimeField(auto_now=True)
+    approved_at           = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def approve(self, admin_user=None):
+        from django.utils import timezone
+        self.status = 'approved'
+        self.approved_at = timezone.now()
+        self.save(update_fields=['status', 'approved_at', 'updated_at'])
+
+        # Update or create user subscription
+        sub, _ = UserSubscription.objects.get_or_create(user=self.user)
+        sub.plan = self.plan_id
+        if self.plan_id == 'starter':
+            sub.is_unlimited = False
+            sub.video_credits_total = sub.video_credits_used + 30
+        elif self.plan_id == 'pro':
+            sub.is_unlimited = False
+            sub.video_credits_total = sub.video_credits_used + 100
+        elif self.plan_id == 'agency':
+            sub.is_unlimited = True
+        sub.save()
+        return sub
+
+    def reject(self, reason=''):
+        self.status = 'rejected'
+        self.admin_notes = reason
+        self.save(update_fields=['status', 'admin_notes', 'updated_at'])
+
+    def __str__(self):
+        return f"Order #{str(self.id)[:8]} - {self.user.username} - {self.plan_title} ({self.status})"

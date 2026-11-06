@@ -4,6 +4,7 @@ API Views — REST endpoints for Reel Studio
 import os
 import json
 import re
+import uuid
 import mimetypes
 from datetime import timezone
 
@@ -71,16 +72,48 @@ def health_check(request):
 # PROJECTS
 # ══════════════════════════════════════════════════════════════
 
+def get_request_user(request):
+    """
+    Get the authenticated user via Django session or X-User-Email header.
+    """
+    if request.user and request.user.is_authenticated:
+        return request.user
+
+    email = request.headers.get('x-user-email') or request.META.get('HTTP_X_USER_EMAIL')
+    if not email and hasattr(request, 'query_params'):
+        email = request.query_params.get('user_email')
+
+    if email:
+        email = email.strip().lower()
+        user = User.objects.filter(email=email).first()
+        if not user:
+            base_username = email.split('@')[0][:20]
+            username = base_username
+            counter = 1
+            while User.objects.filter(username=username).exists():
+                username = f"{base_username[:15]}_{counter}"
+                counter += 1
+            user = User.objects.create(username=username, email=email, first_name=base_username)
+            user.set_unusable_password()
+            user.save()
+        return user
+    return None
+
+
 @api_view(['GET', 'POST'])
 def projects_list(request):
+    user = get_request_user(request)
     if request.method == 'GET':
-        qs = Project.objects.all()
+        if user:
+            qs = Project.objects.filter(user=user)
+        else:
+            qs = Project.objects.none()
         serializer = ProjectListSerializer(qs, many=True)
         return Response({'data': serializer.data})
 
     serializer = ProjectSerializer(data=request.data)
     if serializer.is_valid():
-        project = serializer.save()
+        project = serializer.save(user=user)
         return Response(
             {'data': ProjectSerializer(project).data},
             status=status.HTTP_201_CREATED,
@@ -138,13 +171,16 @@ def director_edit(request, project_id):
 
     text_clips = [clip for track in timeline.get('tracks', []) for clip in track.get('clips', []) if clip.get('type') == 'text']
     caption_tracks = [track for track in timeline.get('tracks', []) if track.get('type') == 'caption']
+    video_tracks = [track for track in timeline.get('tracks', []) if track.get('type') == 'video']
     context = {
         'title': timeline.get('title', project.title),
+        'duration': timeline.get('duration', project.duration),
         'summary': (timeline.get('storyPlan') or {}).get('summary', ''),
         'story_beats': (timeline.get('storyPlan') or {}).get('beats', []),
         'hooks': [{'content': clip.get('content', ''), 'duration': clip.get('duration', 0)} for clip in text_clips[:4]],
         'caption_samples': [segment.get('text', '') for track in caption_tracks for clip in track.get('clips', []) for segment in clip.get('segments', [])[:6]],
         'caption_font_size': next((clip.get('style', {}).get('fontSize') for track in caption_tracks for clip in track.get('clips', [])), 64),
+        'available_images': [{'id': str(m.id), 'name': m.original_name} for m in project.media_files.filter(media_type='image')],
     }
     normalized = prompt.lower()
     quick_edits = []
@@ -166,13 +202,46 @@ def director_edit(request, project_id):
     hook_match = re.search(r'(?:اجعل|غير|غيّر|بدل|بدّل)\s+(?:عنوان\s+)?(?:الهوك|هوك|hook)\s+(?:الى|إلى|:|：)\s*["«“]?(.*?)["»”]?$' , prompt.strip(), re.IGNORECASE)
     if text_clips and hook_match and hook_match.group(1).strip():
         quick_edits.append({'type': 'hook_text', 'value': hook_match.group(1).strip()[:100]})
+    if re.search(r'(صورة|صوره|صور|تصميم|تصاميم|انفوجرافيك|image)', normalized) and re.search(r'(قسم|تقسيم|شاشه|شاشة|split|بيشرح|يشرح|شرح|توضح|توضيح)', normalized):
+        beats = context.get('story_beats') or []
+        first_beat = beats[0] if beats else {}
+        hl = first_beat.get('headline') or first_beat.get('description') or context.get('title') or 'أقسام ومفاهيم'
+        sub = first_beat.get('stat_label') or 'شرح توضيحي للمحتوى'
+        bullets = first_beat.get('stat_value') or ''
+        if not bullets and context.get('caption_samples'):
+            bullets = ' · '.join(context['caption_samples'][:4])
+        quick_edits.append({
+            'type': 'add_infographic_image',
+            'value': {
+                'headline': hl,
+                'subtitle': sub,
+                'bullets': bullets,
+                'startTime': float(first_beat.get('startTime', 0.0)),
+                'duration': max(4.5, float(first_beat.get('endTime', 6.0)) - float(first_beat.get('startTime', 0.0))),
+                'split_screen': True,
+            }
+        })
 
     system = (
-        "You are an editing director. Return JSON only: {message: Arabic string, edits: array}. "
-        "Allowed edits only: {type:'caption_font_size',value:24..112}; {type:'hook_duration',value:0.8..5}; "
-        "{type:'hook_text',value:string up to 100 chars}; {type:'captions_hidden',value:boolean}; "
-        "{type:'caption_background',value:boolean}. Do not invent clips, transcripts, or unsupported editing operations. "
-        "If the user asks for something outside these edits, return edits:[] and explain what is supported in Arabic."
+        "You are an expert AI Video Editing Director for viral social reels. "
+        "Analyze the project context, story beats, duration, and user request, then return JSON only: "
+        "{message: Arabic explanation string, edits: array of edit objects}.\n"
+        "Allowed edit types:\n"
+        "1. {type:'caption_font_size', value: 24..112}\n"
+        "2. {type:'hook_duration', value: 0.8..5}\n"
+        "3. {type:'hook_text', value: 'نص الهوك الجديد'}\n"
+        "4. {type:'captions_hidden', value: true|false}\n"
+        "5. {type:'caption_background', value: true|false}\n"
+        "6. {type:'add_visual_card', value: {headline: string, stat_value: string (e.g. '85%' or 'نقطة 1 · نقطة 2'), stat_label: string, startTime: float, duration: float, position: 'left'|'right'|'center'|'top'}}\n"
+        "   Use position:'top' for a full-width dark top-banner card (top 38% of frame). "
+        "Use it when user asks for explainer cards, info banners, visual designs, or lists/classifications.\n"
+        "6b. {type:'add_infographic_image', value: {headline: string, subtitle: string, bullets: string, startTime: float, duration: float, split_screen: true}}\n"
+        "    Generates a real HD PNG infographic design image with Arabic typography and splits screen with speaker at bottom!\n"
+        "7. {type:'split_layout', value: 'side'|'top'|'fullscreen'}\n"
+        "8. {type:'add_text_card', value: {content: string, startTime: float, duration: float}}\n"
+        "When the user asks to add visual illustrations, designs, info cards, explainers, stats, diagrams or split the reel, "
+        "generate appropriate 'add_visual_card' (position:'top' for top banners) and 'split_layout' edits! "
+        "Always respond politely in natural Arabic explaining what edits were added to the timeline."
     )
     client = None
     try:
@@ -202,7 +271,7 @@ def director_edit(request, project_id):
             data = json.loads(raw)
         edits = data.get('edits', [])
         applied = []
-        for edit in edits[:5]:
+        for edit in edits[:6]:
             kind = edit.get('type')
             value = edit.get('value')
             if kind == 'caption_font_size' and caption_tracks:
@@ -230,6 +299,257 @@ def director_edit(request, project_id):
                         clip.setdefault('style', {})['showBackground'] = value
                         clip['style']['backgroundOpacity'] = 0.72 if value else 0
                 applied.append({'type': kind, 'value': value})
+            elif kind == 'add_infographic_image':
+                val = value if isinstance(value, dict) else edit
+                headline = str(val.get('headline') or '').strip()[:90]
+                subtitle = str(val.get('subtitle') or val.get('stat_label') or '').strip()[:90]
+                bullets = val.get('bullets') or val.get('stat_value') or ''
+                if not headline:
+                    headline = str(context.get('title') or 'الشرح التوضيحي')[:60]
+                start_time = max(0.0, float(val.get('startTime', 0.0)))
+                card_duration = max(2.5, min(15.0, float(val.get('duration', 5.5))))
+
+                from .infographic_generator import create_infographic_media_file
+                img_media = create_infographic_media_file(
+                    project=project,
+                    headline=headline,
+                    subtitle=subtitle,
+                    bullets=bullets,
+                    color_mood='gold',
+                )
+                image_track = next((t for t in timeline.get('tracks', []) if t.get('type') == 'image'), None)
+                if not image_track:
+                    image_track = {
+                        'id': f"track_image_{uuid.uuid4().hex[:6]}",
+                        'name': 'الصور والتصاميم',
+                        'type': 'image',
+                        'order': 1,
+                        'muted': False,
+                        'locked': False,
+                        'hidden': False,
+                        'clips': [],
+                    }
+                    timeline.setdefault('tracks', []).insert(1, image_track)
+
+                img_clip = {
+                    'id': f"clip_img_{uuid.uuid4().hex[:6]}",
+                    'trackId': image_track['id'],
+                    'type': 'image',
+                    'mediaFileId': str(img_media.id),
+                    'mediaUrl': img_media.file.url,
+                    'startTime': start_time,
+                    'duration': card_duration,
+                    'order': len(image_track.get('clips', [])),
+                    'locked': False,
+                    'effects': [],
+                    'animations': [],
+                    'transitions': {
+                        'in': {'type': 'fade', 'duration': 0.4, 'easing': 'ease_out'},
+                        'out': {'type': 'fade', 'duration': 0.3, 'easing': 'ease_in'},
+                    },
+                    'transform': {
+                        'x': 0,
+                        'y': -480,       # Top 50%
+                        'width': 100,
+                        'height': 50,
+                        'rotation': 0,
+                        'scaleX': 1, 'scaleY': 1, 'opacity': 1,
+                        'cropTop': 0, 'cropBottom': 0, 'cropLeft': 0, 'cropRight': 0,
+                    },
+                }
+                image_track.setdefault('clips', []).append(img_clip)
+
+                if val.get('split_screen', True):
+                    for track in timeline.get('tracks', []):
+                        if track.get('type') == 'video':
+                            for vclip in track.get('clips', []):
+                                vt = vclip.setdefault('transform', {})
+                                vt['x'] = 0
+                                vt['y'] = 480      # Bottom 50%
+                                vt['width'] = 100
+                                vt['height'] = 50
+                                vt['scaleX'] = 1
+                                vt['scaleY'] = 1
+                applied.append({'type': kind, 'headline': headline, 'media_id': str(img_media.id)})
+            elif kind == 'add_visual_card':
+                val = value if isinstance(value, dict) else edit
+                headline = str(val.get('headline') or '').strip()[:100]
+                stat_value = str(val.get('stat_value') or '').strip()[:24]
+                stat_label = str(val.get('stat_label') or '').strip()[:70]
+                if headline or stat_value:
+                    start_time = max(0.0, float(val.get('startTime', 0.0)))
+                    card_duration = max(1.5, min(8.0, float(val.get('duration', 3.5))))
+                    position = str(val.get('position', 'left')).lower()
+
+                    # top_banner: full-width card at top of frame (like reference image)
+                    is_banner = position in ('top', 'top_banner', 'banner')
+                    pos_x = 0 if is_banner else (-240 if position == 'left' else (240 if position == 'right' else 0))
+                    pos_y = -390 if is_banner else (-30 if position != 'bottom' else 240)
+                    card_w  = 100 if is_banner else 46
+                    card_h  = 38  if is_banner else 42
+                    card_bg_radius = 0 if is_banner else 20
+                    card_font_size = 44 if is_banner else (38 if stat_value else 32)
+                    card_line_h    = 1.55 if is_banner else 1.35
+                    transition_in  = {'type': 'fade', 'duration': 0.4, 'easing': 'ease_out'} if is_banner else \
+                                     {'type': 'slide_left' if pos_x <= 0 else 'slide_right', 'duration': 0.35, 'easing': 'ease_out'}
+
+                    # Find or create text track
+                    text_track = next((t for t in timeline.get('tracks', []) if t.get('type') == 'text'), None)
+                    if not text_track:
+                        text_track = {
+                            'id': f"track_text_{uuid.uuid4().hex[:6]}",
+                            'name': 'الهوك والأشكال',
+                            'type': 'text',
+                            'muted': False,
+                            'locked': False,
+                            'hidden': False,
+                            'clips': [],
+                        }
+                        timeline.setdefault('tracks', []).append(text_track)
+
+                    # For top_banner: title → subtitle → bullets order
+                    if is_banner:
+                        content_parts = [p for p in (headline, stat_label, stat_value) if p]
+                    else:
+                        stat_chart = ''
+                        percent_match = re.search(r'(\d{1,3})\s*%', stat_value)
+                        if percent_match:
+                            percent = max(0, min(100, int(percent_match.group(1))))
+                            filled = min(10, (percent + 5) // 10)
+                            stat_chart = '■' * filled + '□' * (10 - filled)
+                        content_parts = [p for p in (stat_value, stat_chart, headline, stat_label) if p]
+
+                    new_card = {
+                        'id': f"clip_visual_{uuid.uuid4().hex[:6]}",
+                        'trackId': text_track['id'],
+                        'type': 'text',
+                        'content': '\n'.join(content_parts),
+                        'startTime': start_time,
+                        'duration': card_duration,
+                        'order': len(text_track.get('clips', [])),
+                        'locked': False,
+                        'effects': [],
+                        'animations': [],
+                        'transitions': {'in': transition_in},
+                        'style': {
+                            'fontFamily': 'Cairo',
+                            'fontSize': card_font_size,
+                            'fontWeight': '800',
+                            'fontStyle': 'normal',
+                            'color': '#FFFFFF',
+                            'backgroundColor': '#1A1200' if is_banner else '#1E232A',
+                            'backgroundOpacity': 0.93 if is_banner else 0.94,
+                            'backgroundPadding': 28 if is_banner else 18,
+                            'backgroundBorderRadius': card_bg_radius,
+                            'stroke': None if is_banner else {'color': '#06B6D4', 'width': 2},
+                            'shadow': {'color': 'rgba(0,0,0,0.6)', 'offsetX': 0, 'offsetY': 4 if is_banner else 8, 'blur': 12 if is_banner else 20},
+                            'textAlign': 'center',
+                            'lineHeight': card_line_h,
+                            'letterSpacing': 0,
+                            'direction': 'rtl',
+                        },
+                        'transform': {
+                            'x': pos_x,
+                            'y': pos_y,
+                            'width': card_w,
+                            'height': card_h,
+                            'rotation': 0,
+                            'scaleX': 1,
+                            'scaleY': 1,
+                            'opacity': 1,
+                            'cropTop': 0,
+                            'cropBottom': 0,
+                            'cropLeft': 0,
+                            'cropRight': 0,
+                        },
+                    }
+                    text_track.setdefault('clips', []).append(new_card)
+                    text_clips.append(new_card)
+                    applied.append({'type': kind, 'headline': headline})
+            elif kind == 'split_layout':
+                mode = str(value if isinstance(value, str) else (edit.get('mode') or 'side')).lower()
+                video_tracks = [t for t in timeline.get('tracks', []) if t.get('type') == 'video']
+                for track in video_tracks:
+                    for clip in track.get('clips', []):
+                        t = clip.setdefault('transform', {
+                            'x': 0, 'y': 0, 'width': 100, 'height': 100,
+                            'rotation': 0, 'scaleX': 1, 'scaleY': 1, 'opacity': 1,
+                            'cropTop': 0, 'cropBottom': 0, 'cropLeft': 0, 'cropRight': 0
+                        })
+                        if mode in ('side', 'split_side', 'split'):
+                            t['x'] = 180
+                            t['width'] = 60
+                            t['scaleX'] = 0.95
+                            t['scaleY'] = 0.95
+                        elif mode in ('top', 'split_top'):
+                            t['y'] = -200
+                            t['height'] = 60
+                            t['scaleX'] = 0.95
+                            t['scaleY'] = 0.95
+                        elif mode in ('fullscreen', 'reset', 'normal'):
+                            t['x'] = 0
+                            t['y'] = 0
+                            t['width'] = 100
+                            t['height'] = 100
+                            t['scaleX'] = 1
+                            t['scaleY'] = 1
+                applied.append({'type': kind, 'value': mode})
+            elif kind == 'add_text_card':
+                val = value if isinstance(value, dict) else edit
+                content = str(val.get('content') or '').strip()[:140]
+                if content:
+                    start_time = max(0.0, float(val.get('startTime', 0.0)))
+                    card_duration = max(1.5, min(8.0, float(val.get('duration', 3.0))))
+                    text_track = next((t for t in timeline.get('tracks', []) if t.get('type') == 'text'), None)
+                    if not text_track:
+                        text_track = {
+                            'id': f"track_text_{uuid.uuid4().hex[:6]}",
+                            'name': 'الهوك والأشكال',
+                            'type': 'text',
+                            'muted': False,
+                            'locked': False,
+                            'hidden': False,
+                            'clips': [],
+                        }
+                        timeline.setdefault('tracks', []).append(text_track)
+                    new_card = {
+                        'id': f"clip_text_{uuid.uuid4().hex[:6]}",
+                        'trackId': text_track['id'],
+                        'type': 'text',
+                        'content': content,
+                        'startTime': start_time,
+                        'duration': card_duration,
+                        'order': len(text_track.get('clips', [])),
+                        'locked': False,
+                        'effects': [],
+                        'animations': [],
+                        'transitions': {'in': {'type': 'fade', 'duration': 0.3, 'easing': 'ease_out'}},
+                        'style': {
+                            'fontFamily': 'Cairo',
+                            'fontSize': 34,
+                            'fontWeight': '700',
+                            'fontStyle': 'normal',
+                            'color': '#FFFFFF',
+                            'backgroundColor': '#1E232A',
+                            'backgroundOpacity': 0.9,
+                            'backgroundPadding': 16,
+                            'backgroundBorderRadius': 16,
+                            'stroke': {'color': '#10B981', 'width': 1},
+                            'shadow': {'color': 'rgba(0,0,0,0.5)', 'offsetX': 0, 'offsetY': 6, 'blur': 16},
+                            'textAlign': 'center',
+                            'lineHeight': 1.3,
+                            'letterSpacing': 0,
+                            'direction': 'rtl',
+                        },
+                        'transform': {
+                            'x': 0, 'y': 180, 'width': 65, 'height': 25,
+                            'rotation': 0, 'scaleX': 1, 'scaleY': 1, 'opacity': 1,
+                            'cropTop': 0, 'cropBottom': 0, 'cropLeft': 0, 'cropRight': 0,
+                        },
+                    }
+                    text_track.setdefault('clips', []).append(new_card)
+                    text_clips.append(new_card)
+                    applied.append({'type': kind, 'content': content})
         if not applied:
             return Response({'message': data.get('message', 'لم أجد تعديلًا آمنًا مطابقًا للطلب.'), 'timeline': timeline, 'changed': False})
         timeline['updatedAt'] = dj_timezone.now().isoformat()
@@ -494,6 +814,27 @@ def generate_reel_view(request):
     - Shapes, badges, descriptions and hook banners
     - Saves project and returns immediate editor URL + timeline.
     """
+    # 0. Quota & Subscription check (Run first before heavy file processing)
+    user = get_request_user(request)
+    sub = None
+    if user:
+        from .models import UserSubscription
+        sub, _ = UserSubscription.objects.get_or_create(user=user, defaults={'plan': 'free', 'video_credits_total': 3})
+        if not sub.can_generate:
+            return Response({
+                'status': 'error',
+                'error_code': 'quota_exceeded',
+                'message': 'لقد استهلكت رصيد الفيديوهات المتاح لحسابك (3 ريلز مجاناً). يرجى ترقية باقتك للمتابعة والاستمتاع بميزات حصرية.',
+                'upgrade_url': '/pricing',
+                'quota': {
+                    'plan': sub.plan,
+                    'plan_name': sub.get_plan_display(),
+                    'remaining_credits': 0,
+                    'total_credits': sub.video_credits_total,
+                    'used_credits': sub.video_credits_used,
+                }
+            }, status=402)
+
     file_obj = request.FILES.get('video') or request.FILES.get('file')
     media_file_id = request.data.get('media_file_id')
     prompt_text = request.data.get('prompt', 'شيل الفراغات واضف كابشن واشكال وهوك جذاب')
@@ -503,6 +844,7 @@ def generate_reel_view(request):
     if caption_mode not in ('sentence', 'word_by_word'):
         caption_mode = 'sentence'
     visual_director = str(request.data.get('visual_director', 'true')).lower() not in ('0', 'false', 'no')
+    skill_id = request.data.get('skill_id') or request.data.get('skill')
     reference_obj = request.FILES.get('reference_image')
 
     media_file = None
@@ -545,23 +887,10 @@ def generate_reel_view(request):
 
     if not media_file.duration:
         return Response({'error': 'تعذر قراءة مدة الفيديو. اختر ملف فيديو صالحًا.'}, status=400)
-    try:
-        timeline, actions_taken, intents = generate_reel_timeline(
-            media_file,
-            prompt_text,
-            title,
-            caption_mode=caption_mode,
-            reference_image_path=reference_media.file.path if reference_media else None,
-            visual_director=visual_director,
-        )
-    except ValueError as error:
-        if reference_media:
-            reference_media.file.delete(save=False)
-            reference_media.delete()
-        return Response({'error': str(error)}, status=422)
 
-    # 1. Create Project
+    # 1. Create Project first so generated media files attach cleanly
     project = Project.objects.create(
+        user=user,
         title=title or f"ريل: {prompt_text[:30]}",
         aspect_ratio=aspect_ratio,
         status='draft',
@@ -573,6 +902,24 @@ def generate_reel_view(request):
     if reference_media:
         reference_media.project = project
         reference_media.save()
+
+    try:
+        timeline, actions_taken, intents = generate_reel_timeline(
+            media_file,
+            prompt_text,
+            title,
+            caption_mode=caption_mode,
+            reference_image_path=reference_media.file.path if reference_media else None,
+            visual_director=visual_director,
+            project=project,
+            skill_id=skill_id,
+        )
+    except ValueError as error:
+        project.delete()
+        if reference_media:
+            reference_media.file.delete(save=False)
+            reference_media.delete()
+        return Response({'error': str(error)}, status=422)
 
     # 3. Update project record
     timeline['id'] = str(project.id)
@@ -599,6 +946,9 @@ def generate_reel_view(request):
 
     frontend_editor_url = f"/editor/{project.id}"
 
+    if sub:
+        sub.use_credit()
+
     return Response({
         'status': 'success',
         'message': 'تم توليد الريل بنجاح بناءً على البرومبت 🎬',
@@ -610,3 +960,514 @@ def generate_reel_view(request):
         'timeline': timeline,
     }, status=status.HTTP_201_CREATED)
 
+
+
+# ══════════════════════════════════════════════════════════════
+# AUTHENTICATION & GOOGLE SIGN-IN
+# ══════════════════════════════════════════════════════════════
+from django.contrib.auth import login as dj_login, logout as dj_logout
+from django.contrib.auth.models import User
+
+@api_view(['GET'])
+def auth_me(request):
+    """Returns the current authenticated user session or status."""
+    user = get_request_user(request)
+    if user:
+        from .models import UserSubscription
+        sub, _ = UserSubscription.objects.get_or_create(user=user, defaults={'plan': 'free', 'video_credits_total': 3})
+        return Response({
+            'authenticated': True,
+            'user': {
+                'id': user.id,
+                'email': user.email,
+                'name': user.first_name or user.username,
+                'username': user.username,
+                'plan': sub.plan,
+                'plan_name': sub.get_plan_display(),
+                'remaining_credits': sub.remaining_credits,
+                'total_credits': sub.video_credits_total,
+                'used_credits': sub.video_credits_used,
+                'is_unlimited': sub.is_unlimited,
+                'is_staff': user.is_staff or user.is_superuser,
+            }
+        })
+    return Response({'authenticated': False, 'user': None})
+
+
+@api_view(['POST'])
+def auth_google(request):
+    """
+    Sign in or register with Google.
+    Accepts credential (JWT) or direct Google profile {email, name, avatar}.
+    """
+    import base64
+    data = request.data or {}
+    email = data.get('email', '').strip().lower()
+    name = data.get('name', '').strip()
+    avatar = data.get('avatar', '').strip()
+    credential = data.get('credential', '').strip()
+
+    if credential and '.' in credential:
+        try:
+            parts = credential.split('.')
+            if len(parts) >= 2:
+                payload_b64 = parts[1]
+                padded = payload_b64 + '=' * (-len(payload_b64) % 4)
+                payload_json = json.loads(base64.urlsafe_b64decode(padded).decode('utf-8'))
+                email = payload_json.get('email', email).lower()
+                name = payload_json.get('name', name) or payload_json.get('given_name', name)
+                avatar = payload_json.get('picture', avatar)
+        except Exception:
+            pass
+
+    if not email:
+        return Response({'status': 'error', 'message': 'البريد الإلكتروني مطلوب لتسجيل الدخول.'}, status=400)
+
+    user = User.objects.filter(email=email).first()
+    if not user:
+        base_username = email.split('@')[0][:20]
+        username = base_username
+        counter = 1
+        while User.objects.filter(username=username).exists():
+            username = f"{base_username[:15]}_{counter}"
+            counter += 1
+
+        user = User.objects.create(
+            username=username,
+            email=email,
+            first_name=name or base_username,
+        )
+        user.set_unusable_password()
+        user.save()
+    elif name and not user.first_name:
+        user.first_name = name
+        user.save(update_fields=['first_name'])
+
+    http_req = getattr(request, '_request', request)
+    dj_login(http_req, user)
+    from .models import UserSubscription
+    sub, _ = UserSubscription.objects.get_or_create(user=user, defaults={'plan': 'free', 'video_credits_total': 3})
+    return Response({
+        'status': 'success',
+        'message': f"مرحباً بك، {user.first_name or user.username}! 🎬",
+        'user': {
+            'id': user.id,
+            'email': user.email,
+            'name': user.first_name or user.username,
+            'avatar': avatar,
+            'plan': sub.plan,
+            'plan_name': sub.get_plan_display(),
+            'remaining_credits': sub.remaining_credits,
+            'total_credits': sub.video_credits_total,
+            'used_credits': sub.video_credits_used,
+            'is_unlimited': sub.is_unlimited,
+            'is_staff': user.is_staff or user.is_superuser,
+        }
+    })
+
+
+@api_view(['POST'])
+def auth_login(request):
+    """Standard username/password login (e.g. admin / admin)."""
+    from django.contrib.auth import authenticate
+    data = request.data or {}
+    username = (data.get('username') or data.get('email') or '').strip()
+    password = data.get('password', '').strip()
+
+    if not username or not password:
+        return Response({'status': 'error', 'message': 'اسم المستخدم وكلمة المرور مطلوبان.'}, status=400)
+
+    http_req = getattr(request, '_request', request)
+    user = authenticate(http_req, username=username, password=password)
+    if not user:
+        matched = User.objects.filter(email__iexact=username).first()
+        if matched:
+            user = authenticate(http_req, username=matched.username, password=password)
+
+    if not user:
+        return Response({'status': 'error', 'message': 'اسم المستخدم أو كلمة المرور غير صحيحة.'}, status=401)
+    dj_login(http_req, user)
+    from .models import UserSubscription
+    sub, _ = UserSubscription.objects.get_or_create(user=user, defaults={'plan': 'free', 'video_credits_total': 3})
+    return Response({
+        'status': 'success',
+        'message': f"مرحباً بك مجدداً، {user.first_name or user.username}! 🎬",
+        'user': {
+            'id': user.id,
+            'email': user.email,
+            'name': user.first_name or user.username,
+            'username': user.username,
+            'plan': sub.plan,
+            'plan_name': sub.get_plan_display(),
+            'remaining_credits': sub.remaining_credits,
+            'total_credits': sub.video_credits_total,
+            'used_credits': sub.video_credits_used,
+            'is_unlimited': sub.is_unlimited or user.is_superuser,
+            'is_staff': user.is_staff or user.is_superuser,
+        }
+    })
+
+@api_view(['POST'])
+def auth_logout(request):
+    """Logs out the current session."""
+    dj_logout(request)
+    return Response({'status': 'success', 'message': 'تم تسجيل الخروج بنجاح.'})
+
+
+@api_view(['POST'])
+def auth_update_profile(request):
+    """Update profile name."""
+    user = get_request_user(request)
+    if not user:
+        return Response({'status': 'error', 'message': 'غير مسجل الدخول.'}, status=401)
+
+    name = (request.data.get('name') or '').strip()
+    if name:
+        user.first_name = name
+        user.save(update_fields=['first_name'])
+
+    return Response({
+        'status': 'success',
+        'message': 'تم تحديث بيانات الحساب بنجاح',
+        'user': {
+            'id': user.id,
+            'email': user.email,
+            'name': user.first_name or user.username,
+        }
+    })
+
+
+# ══════════════════════════════════════════════════════════════
+# SUBSCRIPTIONS, QUOTAS & PAYMENT RECEIPT CHECKOUT
+# ══════════════════════════════════════════════════════════════
+
+@api_view(['GET'])
+def subscription_plans(request):
+    """Returns available subscription tiers and payment transfer info."""
+    plans = [
+        {
+            'id': 'free',
+            'title': 'الباقة المجانية التجريبية',
+            'subtitle': 'لتجربة الذكاء الاصطناعي وإنتاج أولى مقاطعك',
+            'price_monthly': 0,
+            'price_annual': 0,
+            'currency': 'ج.م',
+            'credits': 3,
+            'is_popular': False,
+            'badge': 'البداية المجانية',
+            'features': [
+                {'text': '3 ريلز بالذكاء الاصطناعي مجاناً', 'included': True},
+                {'text': 'حذف فترات السكوت تلقائياً', 'included': True},
+                {'text': 'كابشن عربي تلقائي', 'included': True},
+                {'text': 'جودة تصدير 1080p', 'included': True},
+                {'text': 'مخرج بصري وتوليد كروت توضيحية', 'included': True},
+                {'text': 'إزالة العلامة المائية', 'included': False},
+                {'text': 'أولوية معالجة فورية', 'included': False},
+            ],
+        },
+        {
+            'id': 'starter',
+            'title': 'Starter',
+            'subtitle': 'للنشر الأسبوعي وصناع المحتوى المبتدئين',
+            'price_monthly': 190,
+            'price_annual': 135,
+            'billed_annual_total': 1620,
+            'currency': 'EGP',
+            'credits': 15,
+            'is_popular': False,
+            'badge': 'Starter',
+            'features': [
+                {'text': '15 رصيد شهرياً · 9.00 ج.م للرصيد', 'included': True},
+                {'text': 'كابشن ذكي لكل كلمة', 'included': True},
+                {'text': 'تخصيص هوية البراند (Brand kits)', 'included': True},
+                {'text': 'تعديل وتصدير غير محدود وبدون علامة مائية', 'included': True},
+            ],
+        },
+        {
+            'id': 'pro',
+            'title': 'Pro Creator',
+            'subtitle': 'للنشر المستمر وصناع المحتوى المحترفين',
+            'price_monthly': 450,
+            'price_annual': 320,
+            'billed_annual_total': 3840,
+            'currency': 'EGP',
+            'credits': 50,
+            'is_popular': True,
+            'badge': 'الأكثر طلباً ⭐',
+            'features': [
+                {'text': '50 رصيد شهرياً · 6.40 ج.م للرصيد', 'included': True},
+                {'text': 'كل مميزات باقة Starter', 'included': True},
+                {'text': 'أولوية معالجة فورية وتصدير فائق السرعة', 'included': True},
+                {'text': 'كافة مهارات الإخراج البصري الـ 12 المتقدمة', 'included': True},
+                {'text': 'تصدير غير محدود وبدون علامة مائية بجودة 1080p', 'included': True},
+            ],
+        },
+        {
+            'id': 'business',
+            'title': 'Business & Agencies',
+            'subtitle': 'للشركات والوكالات وإدارة الحسابات المتعددة',
+            'price_monthly': 890,
+            'price_annual': 650,
+            'billed_annual_total': 7800,
+            'currency': 'EGP',
+            'credits': 150,
+            'is_popular': False,
+            'badge': 'أفضل قيمة',
+            'features': [
+                {'text': '150 رصيد شهرياً · 4.33 ج.م للرصيد', 'included': True},
+                {'text': 'كل مميزات باقة Pro', 'included': True},
+                {'text': 'أقل تكلفة للريل الواحد على الإطلاق', 'included': True},
+                {'text': 'هويات براند غير محدودة وإدارة فرق عمل', 'included': True},
+                {'text': 'أولوية قصوى ودعم فني مخصص', 'included': True},
+            ],
+        },
+    ]
+
+    payment_info = {
+        'instapay': {
+            'name': 'إنستاباي (InstaPay)',
+            'username': 'sekab@instapay',
+            'account_holder': 'Amr Ahmed Taher Mohamed',
+            'phone': '01023456789',
+            'instructions': 'حوّل المبلغ المطلوب عبر تطبيق إنستاباي إلى المعرّف sekab@instapay (الاسم: Amr Ahmed Taher Mohamed)، ثم التقط لقطة شاشة للإيصال وسجّل رقم العملية أدناه.',
+        },
+        'vodafone_cash': {
+            'name': 'فودافون كاش (Vodafone Cash)',
+            'number': '01023456789',
+            'instructions': 'حوّل مبلغ الباقة إلى رقم المحفظة أعلاه، ثم التقط صورة إيصال التحويل وأرفقها في صفحة الدفع.',
+        },
+    }
+
+    return Response({
+        'status': 'success',
+        'plans': plans,
+        'payment_info': payment_info,
+    })
+
+
+@api_view(['GET'])
+def subscription_my_quota(request):
+    """Returns the current user's quota, plan, and orders."""
+    user = get_request_user(request)
+    if not user:
+        return Response({
+            'status': 'guest',
+            'plan': 'free',
+            'plan_name': 'الباقة التجريبية المجانية',
+            'remaining_credits': 3,
+            'total_credits': 3,
+            'used_credits': 0,
+            'is_unlimited': False,
+            'orders': [],
+        })
+
+    from .models import UserSubscription, SubscriptionOrder
+    sub, _ = UserSubscription.objects.get_or_create(user=user, defaults={'plan': 'free', 'video_credits_total': 3})
+    orders_qs = SubscriptionOrder.objects.filter(user=user)[:5]
+    orders_data = [{
+        'id': str(o.id),
+        'order_number': f"#REEL-{str(o.id)[:6].upper()}",
+        'plan_id': o.plan_id,
+        'plan_title': o.plan_title,
+        'amount': float(o.amount),
+        'currency': o.currency,
+        'payment_method': o.get_payment_method_display(),
+        'sender_phone': o.sender_phone,
+        'status': o.status,
+        'status_display': o.get_status_display(),
+        'receipt_url': request.build_absolute_uri(o.receipt_image.url) if o.receipt_image else None,
+        'created_at': o.created_at.isoformat(),
+        'approved_at': o.approved_at.isoformat() if o.approved_at else None,
+    } for o in orders_qs]
+
+    return Response({
+        'status': 'success',
+        'plan': sub.plan,
+        'plan_name': sub.get_plan_display(),
+        'remaining_credits': sub.remaining_credits,
+        'total_credits': sub.video_credits_total,
+        'used_credits': sub.video_credits_used,
+        'is_unlimited': sub.is_unlimited,
+        'orders': orders_data,
+    })
+
+
+@api_view(['POST'])
+@parser_classes([MultiPartParser, FormParser, JSONParser])
+def subscription_checkout(request):
+    """Creates a pending subscription order with payment receipt."""
+    user = get_request_user(request)
+    if not user:
+        return Response({'status': 'error', 'message': 'يرجى تسجيل الدخول أولاً لإتمام طلب الاشتراك.'}, status=401)
+
+    from .models import SubscriptionOrder
+    plan_id = request.data.get('plan_id', 'starter').strip().lower()
+    plan_title = request.data.get('plan_title', 'باقة صناع المحتوى').strip()
+    amount = request.data.get('amount') or 290.00
+    payment_method = request.data.get('payment_method', 'vodafone_cash')
+    sender_phone = (request.data.get('sender_phone') or '').strip()
+    transaction_ref = (request.data.get('transaction_reference') or '').strip()
+    notes = (request.data.get('notes') or '').strip()
+    receipt_file = request.FILES.get('receipt')
+
+    if not sender_phone:
+        return Response({'status': 'error', 'message': 'يرجى كتابة رقم الهاتف أو المحفظة التي قمت بالتحويل منها.'}, status=400)
+
+    order = SubscriptionOrder.objects.create(
+        user=user,
+        plan_id=plan_id,
+        plan_title=plan_title,
+        amount=amount,
+        payment_method=payment_method,
+        sender_phone=sender_phone,
+        transaction_reference=transaction_ref,
+        receipt_image=receipt_file,
+        notes=notes,
+        status='pending',
+    )
+
+    return Response({
+        'status': 'success',
+        'message': 'تم استلام إيصال التحويل بنجاح! سيتم مراجعة الإيصال وتفعيل باقتك في أسرع وقت.',
+        'order_id': str(order.id),
+        'order_number': f"#REEL-{str(order.id)[:6].upper()}",
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET'])
+def admin_subscription_orders(request):
+    """Lists subscription orders for owner / admin review."""
+    from .models import SubscriptionOrder
+    status_filter = request.query_params.get('status')
+    qs = SubscriptionOrder.objects.all()
+    if status_filter:
+        qs = qs.filter(status=status_filter)
+
+    orders_data = [{
+        'id': str(o.id),
+        'order_number': f"#REEL-{str(o.id)[:6].upper()}",
+        'user': {
+            'id': o.user.id,
+            'name': o.user.first_name or o.user.username,
+            'email': o.user.email,
+        },
+        'plan_id': o.plan_id,
+        'plan_title': o.plan_title,
+        'amount': float(o.amount),
+        'currency': o.currency,
+        'payment_method': o.get_payment_method_display(),
+        'sender_phone': o.sender_phone,
+        'transaction_reference': o.transaction_reference,
+        'receipt_url': request.build_absolute_uri(o.receipt_image.url) if o.receipt_image else None,
+        'notes': o.notes,
+        'status': o.status,
+        'admin_notes': o.admin_notes,
+        'created_at': o.created_at.isoformat(),
+        'approved_at': o.approved_at.isoformat() if o.approved_at else None,
+    } for o in qs[:50]]
+
+    return Response({
+        'status': 'success',
+        'total': len(orders_data),
+        'orders': orders_data,
+    })
+
+
+@api_view(['POST'])
+def admin_order_action(request, order_id):
+    """Approve or reject a subscription order."""
+    from .models import SubscriptionOrder
+    order = get_object_or_404(SubscriptionOrder, id=order_id)
+    action = request.data.get('action')
+    reason = request.data.get('reason', '')
+
+    if action == 'approve':
+        sub = order.approve()
+        return Response({
+            'status': 'success',
+            'message': f'تمت الموافقة وتفعيل {order.plan_title} للمستخدم {order.user.email} بنجاح! 🚀',
+            'order_status': order.status,
+            'user_remaining_credits': sub.remaining_credits,
+        })
+    elif action == 'reject':
+        order.reject(reason)
+        return Response({
+            'status': 'success',
+            'message': 'تم رفض الطلب.',
+            'order_status': order.status,
+        })
+    return Response({'error': 'Invalid action. Use "approve" or "reject".'}, status=400)
+
+
+
+@api_view(['GET'])
+def admin_users_list(request):
+    """List all registered users for administration."""
+    user = get_request_user(request)
+    if not user or not (user.is_staff or user.is_superuser):
+        return Response({'status': 'error', 'message': 'صلاحيات المدير مطلوبة.'}, status=403)
+
+    from .models import UserSubscription
+    users_data = []
+    for u in User.objects.all().order_by('-date_joined'):
+        sub, _ = UserSubscription.objects.get_or_create(user=u, defaults={'plan': 'free', 'video_credits_total': 3})
+        users_data.append({
+            'id': u.id,
+            'username': u.username,
+            'email': u.email,
+            'name': u.first_name or u.username,
+            'plan': sub.plan,
+            'plan_name': sub.get_plan_display(),
+            'remaining_credits': sub.remaining_credits,
+            'total_credits': sub.video_credits_total,
+            'used_credits': sub.video_credits_used,
+            'is_unlimited': sub.is_unlimited or u.is_superuser,
+            'is_staff': u.is_staff or u.is_superuser,
+            'date_joined': u.date_joined.isoformat(),
+        })
+
+    return Response({'status': 'success', 'users': users_data})
+
+
+@api_view(['POST'])
+def admin_update_user(request, user_id):
+    """Update user subscription, plan, or credits."""
+    admin_user = get_request_user(request)
+    if not admin_user or not (admin_user.is_staff or admin_user.is_superuser):
+        return Response({'status': 'error', 'message': 'صلاحيات المدير مطلوبة.'}, status=403)
+
+    target_user = get_object_or_404(User, id=user_id)
+    from .models import UserSubscription
+    sub, _ = UserSubscription.objects.get_or_create(user=target_user)
+
+    data = request.data or {}
+    new_plan = data.get('plan')
+    add_credits = data.get('add_credits')
+    set_unlimited = data.get('is_unlimited')
+
+    if new_plan in ('free', 'starter', 'pro', 'business'):
+        sub.plan = new_plan
+
+    if add_credits is not None:
+        try:
+            credits_val = int(add_credits)
+            sub.video_credits_total += credits_val
+        except (ValueError, TypeError):
+            pass
+
+    if set_unlimited is not None:
+        sub.is_unlimited = bool(set_unlimited)
+
+    sub.save()
+    return Response({
+        'status': 'success',
+        'message': f"تم تحديث بيانات حساب {target_user.username} بنجاح.",
+        'user': {
+            'id': target_user.id,
+            'username': target_user.username,
+            'email': target_user.email,
+            'plan': sub.plan,
+            'remaining_credits': sub.remaining_credits,
+            'is_unlimited': sub.is_unlimited,
+        }
+    })

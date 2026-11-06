@@ -570,3 +570,38 @@ button svg { flex-shrink:0; }
 .editor-toolbar input::placeholder { color:#9caea5; }
 .editor-preview button[aria-label] { background:#159782!important; box-shadow:none!important; }
 @media(max-width:760px) { :root { --timeline-controls-width:105px; }.editor-timeline .btn { min-height:28px; }.editor-toolbar .btn { min-height:30px; } }
+
+/* AppShell Responsive Sidebar & Mobile Top Header */
+.app-mobile-top-header {
+  display: none !important;
+}
+
+@media (max-width: 768px) {
+  .app-mobile-top-header {
+    display: flex !important;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 60px;
+    background: #ffffff;
+    border-bottom: 1px solid #dfe4da;
+    z-index: 50;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    box-shadow: 0 2px 10px rgba(36, 62, 53, 0.03);
+  }
+  .app-sidebar {
+    transform: translateX(100%);
+  }
+  .app-sidebar.mobile-open {
+    transform: translateX(0);
+    box-shadow: 0 0 30px rgba(36, 62, 53, 0.25);
+  }
+  .app-main-content {
+    margin-right: 0 !important;
+    padding-top: 76px !important;
+  }
+}
+
